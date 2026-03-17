@@ -5,6 +5,7 @@ from pyvistaqt import QtInteractor
 import laspy
 from scipy.spatial import cKDTree
 import time
+from collections import deque
 
 
 from PySide6.QtWidgets import (
@@ -119,13 +120,14 @@ class MainWindow(QMainWindow):
         if num_seed == 0:
             return
 
-        max_points = 10000
+        max_points = 100000
 
         seed_point = self.current_points[list(self.seed_id)]
 
         if num_seed <= 3:
             visited = set(self.seed_id)
-            stack = list(self.seed_id)
+            stack = deque(self.seed_id)
+            queued = set(self.seed_id)
             start_time = time.perf_counter()
 
             while stack and len(visited) < max_points:
@@ -133,35 +135,78 @@ class MainWindow(QMainWindow):
                 if end_time - start_time > 10:
                     print("10 second\n")
                     break
-                pid = stack.pop(0)
+
+                pid = stack.popleft()
                 p = self.current_points[pid]
 
-                # k = 30
-                # _, neighbors = self.kdtree.query(p, k=k)
+                # 1. 当前点邻域
                 neighbors = self.kdtree.query_ball_point(p, r=self.radus)
-                for nid in neighbors:
+                neighbors = [i for i in neighbors if self.valid_mask[i]]
 
-                    if nid in visited:
-                        continue
+                if len(neighbors) < 5:
+                    continue
 
-                    if self.valid_mask[nid] == False:
-                        continue
+                pts = self.current_points[neighbors]
+                center = pts.mean(axis=0)
 
-                    point = self.current_points[nid]
+                # 2. PCA
+                cov = np.cov((pts - center).T)
+                eigvals, eigvecs = np.linalg.eigh(cov)
 
-                    flag = False
-                    p1 = point.copy()
-                    p2 = point.copy()
-                    p1[2] += 1.3 * self.radus
-                    p2[2] -= 1.3 * self.radus
-                    idx1 = self.kdtree.query_ball_point(p1, r=0.3)
-                    idx2 = self.kdtree.query_ball_point(p2, r=0.3) 
-                    if(len(idx1)+len(idx2) <= 10):
-                        flag = True
+                order = np.argsort(eigvals)[::-1]
+                eigvals = eigvals[order]
+                eigvecs = eigvecs[:, order]
 
-                    if flag == True:
-                        visited.add(nid)
-                        stack.append(nid)
+                if eigvals[0] < 1e-12:
+                    continue
+
+                direction = eigvecs[:, 0]
+                linearity = (eigvals[0] - eigvals[1]) / eigvals[0]
+
+                # 当前局部不像导线，就不扩
+                if linearity < 0.7:
+                    continue
+
+                # 3. 用主轴做几何筛选，而不是逐点PCA
+                vecs = pts - center
+                ts = vecs @ direction
+                perp = vecs - np.outer(ts, direction)
+                d_perp = np.linalg.norm(perp, axis=1)
+
+                # 圆柱约束：离主轴不能太远
+                mask = d_perp < (0.5 * self.radus)
+
+                accepted_ids = np.array(neighbors)[mask]
+                accepted_ts = ts[mask]
+
+                if len(accepted_ids) == 0:
+                    continue
+
+                # 4. 批量加入 visited
+                new_ids = [i for i in accepted_ids if i not in visited]
+                visited.update(new_ids)
+
+                # 5. 只选前沿点入队
+                frontier = set()
+
+                if len(accepted_ids) == 1:
+                    frontier.add(int(accepted_ids[0]))
+                else:
+                    idx_max = np.argmax(accepted_ts)
+                    idx_min = np.argmin(accepted_ts)
+
+                    frontier.add(int(accepted_ids[idx_max]))
+                    frontier.add(int(accepted_ids[idx_min]))
+
+                # 也可以每边选2个，而不是1个
+                # frontier = set(accepted_ids[np.argsort(accepted_ts)[-2:]]) | \
+                #            set(accepted_ids[np.argsort(accepted_ts)[:2]])
+
+                for fid in frontier:
+                    if fid not in queued:
+                        stack.append(fid)
+                        queued.add(fid)
+
             wire_ids = list(visited)
                         
         else:
