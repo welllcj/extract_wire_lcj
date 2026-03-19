@@ -6,15 +6,16 @@ import laspy
 from scipy.spatial import cKDTree
 import time
 from collections import deque
-
+import os
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QPushButton, QFileDialog,
     QLabel, QHBoxLayout, QColorDialog,
-    QDoubleSpinBox
+    QDoubleSpinBox, QToolButton, QFrame
 )
-
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QIcon
 
 class MainWindow(QMainWindow):
 
@@ -27,7 +28,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.radus = 0.3
         layout = QHBoxLayout(central)
-
+        self.extract_mode = "point"   # "point" 或 "curve"
         # 左侧工具栏
         left_panel = QVBoxLayout()
         self.load_btn = QPushButton("加载点云")
@@ -67,16 +68,92 @@ class MainWindow(QMainWindow):
 
         left_panel.addStretch()
 
+       
         # 3D 视图
         self.plotter = QtInteractor(self)
 
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        point_icon_path = os.path.join(base_dir, "icons", "point.png")
+        curve_icon_path = os.path.join(base_dir, "icons", "curve.png")
+
+        print("脚本目录:", base_dir)
+        print("point路径:", point_icon_path)
+        print("curve路径:", curve_icon_path)
+        print("point存在:", os.path.exists(point_icon_path))
+        print("curve存在:", os.path.exists(curve_icon_path))
+
+        self.mode_point_btn = QToolButton(self.plotter)
+        self.mode_point_btn.setIcon(QIcon(point_icon_path))
+        self.mode_point_btn.setIconSize(QSize(30, 30))
+        self.mode_point_btn.setFixedSize(44, 44)
+        self.mode_point_btn.setFocusPolicy(Qt.NoFocus)
+        self.mode_point_btn.setToolTip("单点模式")
+        self.mode_point_btn.clicked.connect(self.set_point_mode)
+
+        self.mode_curve_btn = QToolButton(self.plotter)
+        self.mode_curve_btn.setIcon(QIcon(curve_icon_path))
+        self.mode_curve_btn.setIconSize(QSize(30, 30))
+        self.mode_curve_btn.setFixedSize(44, 44)
+        self.mode_curve_btn.setFocusPolicy(Qt.NoFocus)
+        self.mode_curve_btn.setToolTip("曲线模式")
+        self.mode_curve_btn.clicked.connect(self.set_curve_mode)
+
+        # ===== 设置样式 =====
+        self.normal_btn_style = """
+        QToolButton {
+            background-color: yellow;
+            border: none;
+            outline: none;
+            border-radius: 0px;
+            padding: 4px;
+        }
+        """
+
+        self.active_btn_style = """
+        QToolButton {
+            background-color: lime;
+            border: none;
+            outline: none;
+            border-radius: 0px;
+            padding: 4px;
+        }
+        """
+        self.mode_point_btn.setStyleSheet(self.active_btn_style)   # 默认point模式高亮
+        self.mode_curve_btn.setStyleSheet(self.normal_btn_style)
+
+        # 初始位置（先写死，后面 resizeEvent 里动态调整）
+        self.mode_point_btn.move(20, 60)
+        self.mode_curve_btn.move(20, 120)
+
+        self.mode_point_btn.show()
+        self.mode_curve_btn.show()
+
         layout.addLayout(left_panel, 1)
         layout.addWidget(self.plotter, 4)
+ 
 
 
         self.points_actor = None
         self.undo_stack = []
         self.color = None
+
+    def update_mode_buttons(self):
+        if self.extract_mode == "point":
+            self.mode_point_btn.setStyleSheet(self.active_btn_style)
+            self.mode_curve_btn.setStyleSheet(self.normal_btn_style)
+        else:
+            self.mode_point_btn.setStyleSheet(self.normal_btn_style)
+            self.mode_curve_btn.setStyleSheet(self.active_btn_style)
+
+    def set_point_mode(self):
+        self.extract_mode = "point"
+        print("当前模式：单点提取")
+        self.update_mode_buttons()
+
+    def set_curve_mode(self):
+        self.extract_mode = "curve"
+        print("当前模式：曲线/多点提取")
+        self.update_mode_buttons()
 
     def save_point_cloud(self):
         pass
@@ -120,17 +197,15 @@ class MainWindow(QMainWindow):
         if num_seed == 0:
             return
 
-        max_points = 100000
-
         seed_point = self.current_points[list(self.seed_id)]
 
-        if num_seed <= 3:
+        if self.extract_mode == "point":
             visited = set(self.seed_id)
             stack = deque(self.seed_id)
             queued = set(self.seed_id)
             start_time = time.perf_counter()
 
-            while stack and len(visited) < max_points:
+            while stack :
                 end_time = time.perf_counter()
                 if end_time - start_time > 10:
                     print("10 second\n")
@@ -164,6 +239,8 @@ class MainWindow(QMainWindow):
                 linearity = (eigvals[0] - eigvals[1]) / eigvals[0]
 
                 # 当前局部不像导线，就不扩
+                print(f"线性度：{linearity}")
+
                 if linearity < 0.7:
                     continue
 
@@ -255,7 +332,7 @@ class MainWindow(QMainWindow):
             first_refit = True
             start_time = time.perf_counter()
 
-            while stack and len(visited) < max_points:
+            while stack :
                 end_time = time.perf_counter()
                 if end_time - start_time > 10:
                     print("10 second\n")
