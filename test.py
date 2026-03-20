@@ -26,7 +26,7 @@ class MainWindow(QMainWindow):
         self.seed_id = set()
         central = QWidget()
         self.setCentralWidget(central)
-        self.radus = 0.3
+        self.radus = 0.15
         layout = QHBoxLayout(central)
         self.extract_mode = "point"   # "point" 或 "curve"
         # 左侧工具栏
@@ -191,251 +191,356 @@ class MainWindow(QMainWindow):
         self.points_actor.GetMapper().ScalarVisibilityOn()
         self.plotter.render()
 
-    ### 提取线缆
+    ### 点模式
+    def extract_wire_point_mode(self):
+        visited = set(self.seed_id)
+        queued = set(self.seed_id)
+
+        # 队列里存 (点id, 父方向)
+        stack = deque((pid, None) for pid in self.seed_id)
+
+        start_time = time.perf_counter()
+
+        # 参数：方向连续性阈值
+        direction_cos_thresh = 0.8   # 越接近1越严格，可调
+
+        while stack:
+            end_time = time.perf_counter()
+            if end_time - start_time > 10:
+                print("10 second\n")
+                break
+
+            pid, parent_dir = stack.popleft()
+            p = self.current_points[pid]
+
+            # 1. 当前点邻域
+            neighbors = self.kdtree.query_ball_point(p, r=self.radus)
+            neighbors = [i for i in neighbors if self.valid_mask[i]]
+
+            if len(neighbors) < 5:
+                continue
+
+            pts = self.current_points[neighbors]
+            center = pts.mean(axis=0)
+
+            # 2. PCA
+            cov = np.cov((pts - center).T)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+
+            order = np.argsort(eigvals)[::-1]
+            eigvals = eigvals[order]
+            eigvecs = eigvecs[:, order]
+
+            if eigvals[0] < 1e-12:
+                continue
+
+            direction = eigvecs[:, 0]
+            linearity = (eigvals[0] - eigvals[1]) / eigvals[0]
+
+            print(f"线性度：{linearity}")
+
+            # 当前局部不像导线，就不扩
+            if linearity < 0.75:
+                continue
+
+            # 3. 新增：和父节点方向做连续性约束
+            if parent_dir is not None:
+                cos_theta = abs(np.dot(direction, parent_dir))
+                print(f"方向一致性：{cos_theta}")
+
+                if cos_theta < direction_cos_thresh:
+                    continue
+
+            # 4. 用主轴做几何筛选，而不是逐点PCA
+            vecs = pts - center
+            ts = vecs @ direction
+            perp = vecs - np.outer(ts, direction)
+            d_perp = np.linalg.norm(perp, axis=1)
+
+            # 圆柱约束：离主轴不能太远
+            mask = d_perp < (0.5 * self.radus)
+
+            accepted_ids = np.array(neighbors)[mask]
+            accepted_ts = ts[mask]
+
+            if len(accepted_ids) == 0:
+                continue
+
+            # 5. 批量加入 visited
+            new_ids = [i for i in accepted_ids if i not in visited]
+            visited.update(new_ids)
+
+            # 6. 只选前沿点入队
+            frontier = set()
+
+            if len(accepted_ids) == 1:
+                frontier.add(int(accepted_ids[0]))
+            else:
+                idx_max = np.argmax(accepted_ts)
+                idx_min = np.argmin(accepted_ts)
+
+                frontier.add(int(accepted_ids[idx_max]))
+                frontier.add(int(accepted_ids[idx_min]))
+
+            # 7. 子节点继承当前方向
+            for fid in frontier:
+                if fid not in queued:
+                    stack.append((fid, direction.copy()))
+                    queued.add(fid)
+
+        wire_ids = list(visited)
+        return wire_ids
+    ### 曲线提取模式
+    def extract_wire_curve_mode(self):
+        if len(self.seed_id) < 2:
+            print("曲线模式至少需要两个种子点")
+            return list(self.seed_id)
+
+        start_time = time.perf_counter()
+
+        # =========================
+        # 参数设置
+        # =========================
+
+        linearity_thresh = 0.75                      # 局部线性度阈值
+        dist_thresh =  self.radus /2              # 点到拟合曲线对应点的距离阈值
+
+        refit_batch_size = 50                        # 每新增多少点重拟合一次
+        frontier_k = 5                               # 每端选几个前沿点
+
+        # =========================
+        # 1. 取出种子点
+        # =========================
+        seed_ids = list(self.seed_id)
+        seed_points = self.current_points[seed_ids]
+
+        # =========================
+        # 2. 初始拟合
+        #    方案A：t 就是 PCA 投影坐标
+        # =========================
+        pts = seed_points
+        centroid_fit = pts.mean(axis=0)
+
+        cov = np.cov((pts - centroid_fit).T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+
+        order_idx = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order_idx]
+        eigvecs = eigvecs[:, order_idx]
+
+        if eigvals[0] < 1e-12:
+            print("种子点分布异常，无法拟合曲线")
+            return list(self.seed_id)
+
+        direction_fit = eigvecs[:, 0]
+
+        # t = PCA投影坐标
+        t = (pts - centroid_fit) @ direction_fit
+
+        if np.max(t) - np.min(t) < 1e-8:
+            print("种子点投影范围过小，无法拟合曲线")
+            return list(self.seed_id)
+
+        n = len(pts)
+        order = min(3, max(1, n // 5))
+
+        A = np.vstack([t**i for i in range(order + 1)]).T
+
+        ax = np.linalg.lstsq(A, pts[:, 0], rcond=None)[0]
+        ay = np.linalg.lstsq(A, pts[:, 1], rcond=None)[0]
+        az = np.linalg.lstsq(A, pts[:, 2], rcond=None)[0]
+
+        # =========================
+        # 3. 初始化
+        # =========================
+        visited = set(seed_ids)
+        queue = deque(seed_ids)
+
+        new_added_since_refit = 0
+        refit_count = 0
+
+        # =========================
+        # 4. 区域生长
+        # =========================
+        while queue:
+            if time.perf_counter() - start_time > 10:
+                print("曲线提取超时 10 秒，提前结束")
+                break
+
+            pid = queue.popleft()
+            p = self.current_points[pid]
+
+
+            # ==========================================
+            # 4.2 判断当前中心点局部区域是不是像一条线
+            # ==========================================
+            local_neighbors = self.kdtree.query_ball_point(p, r=self.radus)
+            local_neighbors = [i for i in local_neighbors if self.valid_mask[i]]
+
+            if len(local_neighbors) < 5:
+                continue
+
+            local_pts = self.current_points[local_neighbors]
+            local_center = local_pts.mean(axis=0)
+
+            local_cov = np.cov((local_pts - local_center).T)
+            local_eigvals, local_eigvecs = np.linalg.eigh(local_cov)
+
+            local_order_idx = np.argsort(local_eigvals)[::-1]
+            local_eigvals = local_eigvals[local_order_idx]
+            local_eigvecs = local_eigvecs[:, local_order_idx]
+
+            if local_eigvals[0] < 1e-12:
+                continue
+
+            linearity = (local_eigvals[0] - local_eigvals[1]) / local_eigvals[0]
+
+            if linearity < linearity_thresh:
+                continue
+
+            local_dir = local_eigvecs[:, 0]
+
+            # ==========================================
+            # 4.3 当前中心点投影到当前拟合PCA方向，得到 t
+            # ==========================================
+            t_p = np.dot(p - centroid_fit, direction_fit)
+
+            # ==========================================
+            # 4.4 将 t 回代到空间曲线方程，得到曲线上对应点 q
+            # ==========================================
+            q = np.zeros(3)
+            for i in range(order + 1):
+                q[0] += ax[i] * t_p**i
+                q[1] += ay[i] * t_p**i
+                q[2] += az[i] * t_p**i
+
+            # ==========================================
+            # 4.5 计算当前中心点与曲线对应点的距离
+            # ==========================================
+            dist_to_curve = np.linalg.norm(p - q)
+
+            if dist_to_curve > dist_thresh:
+                continue
+
+            # ==========================================
+            # 4.6 当前中心点满足条件，则这一球邻域默认都接收
+            # ==========================================
+            accepted_ids = [i for i in local_neighbors if i not in visited]
+
+            if len(accepted_ids) == 0:
+                continue
+
+            visited.update(accepted_ids)
+            new_added_since_refit += len(accepted_ids)
+
+            # ==========================================
+            # 4.7 从当前邻域里选前沿点
+            #     选距离中心较远，并且在局部PCA方向两端的点
+            # ==========================================
+            accepted_ids = np.array(accepted_ids)
+            accepted_pts = self.current_points[accepted_ids]
+
+            vecs = accepted_pts - p
+            proj = vecs @ local_dir
+
+            frontier = set()
+
+            if len(accepted_ids) <= 2:
+                for idx in accepted_ids:
+                    frontier.add(int(idx))
+            else:
+                sort_idx = np.argsort(proj)
+                k = min(frontier_k, len(sort_idx))
+
+                for idx in sort_idx[:k]:
+                    frontier.add(int(accepted_ids[idx]))
+
+                for idx in sort_idx[-k:]:
+                    frontier.add(int(accepted_ids[idx]))
+
+            for fid in frontier:
+                queue.append(fid)
+
+            # ==========================================
+            # 4.8 生长一定数量后重新拟合
+            #     更新 centroid_fit, direction_fit, 曲线参数方程
+            # ==========================================
+            if new_added_since_refit >= refit_batch_size:
+                pts = self.current_points[list(visited)]
+
+                if len(pts) >= 3:
+                    centroid_fit = pts.mean(axis=0)
+
+                    cov = np.cov((pts - centroid_fit).T)
+                    eigvals, eigvecs = np.linalg.eigh(cov)
+
+                    order_idx = np.argsort(eigvals)[::-1]
+                    eigvals = eigvals[order_idx]
+                    eigvecs = eigvecs[:, order_idx]
+
+                    if eigvals[0] > 1e-12:
+                        direction_fit = eigvecs[:, 0]
+
+                        # 方案A：重新用新的 PCA 投影坐标作为参数 t
+                        t = (pts - centroid_fit) @ direction_fit
+
+                        if np.max(t) - np.min(t) > 1e-8:
+                            n = len(pts)
+                            order = min(3, max(1, n // 20))
+
+                            A = np.vstack([t**i for i in range(order + 1)]).T
+
+                            ax = np.linalg.lstsq(A, pts[:, 0], rcond=None)[0]
+                            ay = np.linalg.lstsq(A, pts[:, 1], rcond=None)[0]
+                            az = np.linalg.lstsq(A, pts[:, 2], rcond=None)[0]
+
+                            refit_count += 1
+                            print(f"完成第 {refit_count} 次重拟合，当前点数: {len(visited)}")
+
+                new_added_since_refit = 0
+
+        wire_ids = list(visited)
+        return wire_ids
+    
     def extract_wire(self):
-        num_seed = len(self.seed_id)
-        if num_seed == 0:
+        if len(self.seed_id) == 0:
             return
 
-        seed_point = self.current_points[list(self.seed_id)]
-
         if self.extract_mode == "point":
-            visited = set(self.seed_id)
-            stack = deque(self.seed_id)
-            queued = set(self.seed_id)
-            start_time = time.perf_counter()
-
-            while stack :
-                end_time = time.perf_counter()
-                if end_time - start_time > 10:
-                    print("10 second\n")
-                    break
-
-                pid = stack.popleft()
-                p = self.current_points[pid]
-
-                # 1. 当前点邻域
-                neighbors = self.kdtree.query_ball_point(p, r=self.radus)
-                neighbors = [i for i in neighbors if self.valid_mask[i]]
-
-                if len(neighbors) < 5:
-                    continue
-
-                pts = self.current_points[neighbors]
-                center = pts.mean(axis=0)
-
-                # 2. PCA
-                cov = np.cov((pts - center).T)
-                eigvals, eigvecs = np.linalg.eigh(cov)
-
-                order = np.argsort(eigvals)[::-1]
-                eigvals = eigvals[order]
-                eigvecs = eigvecs[:, order]
-
-                if eigvals[0] < 1e-12:
-                    continue
-
-                direction = eigvecs[:, 0]
-                linearity = (eigvals[0] - eigvals[1]) / eigvals[0]
-
-                # 当前局部不像导线，就不扩
-                print(f"线性度：{linearity}")
-
-                if linearity < 0.7:
-                    continue
-
-                # 3. 用主轴做几何筛选，而不是逐点PCA
-                vecs = pts - center
-                ts = vecs @ direction
-                perp = vecs - np.outer(ts, direction)
-                d_perp = np.linalg.norm(perp, axis=1)
-
-                # 圆柱约束：离主轴不能太远
-                mask = d_perp < (0.5 * self.radus)
-
-                accepted_ids = np.array(neighbors)[mask]
-                accepted_ts = ts[mask]
-
-                if len(accepted_ids) == 0:
-                    continue
-
-                # 4. 批量加入 visited
-                new_ids = [i for i in accepted_ids if i not in visited]
-                visited.update(new_ids)
-
-                # 5. 只选前沿点入队
-                frontier = set()
-
-                if len(accepted_ids) == 1:
-                    frontier.add(int(accepted_ids[0]))
-                else:
-                    idx_max = np.argmax(accepted_ts)
-                    idx_min = np.argmin(accepted_ts)
-
-                    frontier.add(int(accepted_ids[idx_max]))
-                    frontier.add(int(accepted_ids[idx_min]))
-
-                # 也可以每边选2个，而不是1个
-                # frontier = set(accepted_ids[np.argsort(accepted_ts)[-2:]]) | \
-                #            set(accepted_ids[np.argsort(accepted_ts)[:2]])
-
-                for fid in frontier:
-                    if fid not in queued:
-                        stack.append(fid)
-                        queued.add(fid)
-
-            wire_ids = list(visited)
-                        
+            wire_ids = self.extract_wire_point_mode()
+        elif self.extract_mode == "curve":
+            wire_ids = self.extract_wire_curve_mode()
         else:
-            
-            # ===== 1 PCA排序 =====
-            pts = seed_point
-            centroid = pts.mean(axis=0)
-
-            cov = np.cov((pts - centroid).T)
-            eigvals, eigvecs = np.linalg.eig(cov)
-            direction = eigvecs[:, np.argmax(eigvals)]
-
-            # 参数 t
-            t = (pts - centroid) @ direction
-
-            # ===== 根据点数量确定曲线阶数 =====
-            n = len(pts)
-            order = min(4, max(1, n // 3))
-
-            # ===== 最小二乘曲线拟合 =====
-            A = np.vstack([t**i for i in range(order+1)]).T
-
-            ax = np.linalg.lstsq(A, pts[:,0], rcond=None)[0]
-            ay = np.linalg.lstsq(A, pts[:,1], rcond=None)[0]
-            az = np.linalg.lstsq(A, pts[:,2], rcond=None)[0]
-
-            # ===== 采样曲线 =====
-            length = t.max() - t.min()
-            ts = np.linspace(t.min()-length, t.max()+length, 200)
-
-            curve = np.zeros((len(ts),3))
-
-            for i in range(order+1):
-                curve[:,0] += ax[i] * ts**i
-                curve[:,1] += ay[i] * ts**i
-                curve[:,2] += az[i] * ts**i
-
-            # ===== 4 区域生长 =====
-            visited = set(self.seed_id)
-            stack = list(self.seed_id)
-
-            # 记录哪些seed已经扩展过
-            expanded_seed = set()
-
-            # 是否已经进行第二次拟合
-            first_refit = True
-            start_time = time.perf_counter()
-
-            while stack :
-                end_time = time.perf_counter()
-                if end_time - start_time > 10:
-                    print("10 second\n")
-                    break
-                pid = stack.pop(0)
-                p = self.current_points[pid]
-
-                # k = 30
-                # _, neighbors = self.kdtree.query(p, k=k)
-                neighbors = self.kdtree.query_ball_point(p, r=self.radus)
-                for nid in neighbors:
-
-                    if nid in visited:
-                        continue
-
-                    if self.valid_mask[nid] == False:
-                        continue
-
-                    point = self.current_points[nid]
-
-                    # 点到曲线最小距离
-                    d = np.linalg.norm(curve - point, axis=1).min()
-                    flag = False
-                    p1 = point.copy()
-                    p2 = point.copy()
-                    p1[2] += 1.414 * self.radus
-                    p2[2] -= 1.414 * self.radus
-                    idx1 = self.kdtree.query_ball_point(p1, r=0.15)
-                    idx2 = self.kdtree.query_ball_point(p2, r=0.15) 
-                    if(len(idx1)+len(idx2) <= 5):
-                        flag = True
-
-                    if d < self.radus and flag == True:
-                        visited.add(nid)
-                        stack.append(nid)
-
-                # ===== 记录seed是否扩展过 =====
-                if pid in self.seed_id:
-                    expanded_seed.add(pid)
-
-                # ===== 所有seed扩展一遍后进行第二次拟合 =====
-                if first_refit and len(expanded_seed) == num_seed:
-
-                    pts = self.current_points[list(visited)]
-
-                    centroid = pts.mean(axis=0)
-
-                    cov = np.cov((pts - centroid).T)
-                    eigvals, eigvecs = np.linalg.eig(cov)
-                    direction = eigvecs[:, np.argmax(eigvals)]
-
-                    t = (pts - centroid) @ direction
-
-                    # 根据点数量重新确定阶数
-                    n = len(pts)
-                    order = min(4, max(1, n // 3))
-
-                    A = np.vstack([t**i for i in range(order+1)]).T
-
-                    ax = np.linalg.lstsq(A, pts[:,0], rcond=None)[0]
-                    ay = np.linalg.lstsq(A, pts[:,1], rcond=None)[0]
-                    az = np.linalg.lstsq(A, pts[:,2], rcond=None)[0]
-
-                    length = t.max() - t.min()
-                    ts = np.linspace(t.min()-length, t.max()+length, 200)
-
-                    curve = np.zeros((len(ts),3))
-
-                    for i in range(order+1):
-                        curve[:,0] += ax[i] * ts**i
-                        curve[:,1] += ay[i] * ts**i
-                        curve[:,2] += az[i] * ts**i
-
-                    first_refit = False
-
-            wire_ids = list(visited)
-
-    
-        print("Wire points:", len(visited))
-
+            return
+        
+        seed_indices= list(self.seed_id)
+        # 清空种子点
+        self.seed_id.clear()
+        self.info_label.setText(
+           f"Seed IDs:\n"
+        )
+        if  len(wire_ids) == len(seed_indices):
+            print("没有提取成功\n")
+            # 如果没有提取出点的话，把种子点变成正常的颜色
+            self.current_cloud[self.color_array_name][seed_indices,0:3] = self.color[0:3]
+            # 只更新 mapper，不要重新 add_mesh
+            self.points_actor.GetMapper().ScalarVisibilityOn()
+            self.points_actor.GetMapper().SetScalarModeToUsePointData()
+            self.points_actor.GetProperty().SetOpacity(1.0)
+            self.plotter.render()
+            return 
         # 将导线标红
         self.highlight_points(wire_ids)
         # 逻辑删除
         self.valid_mask[wire_ids] = False
         # 记录这次删除
         self.undo_stack.append(wire_ids)
-        # 清空种子点
-        self.seed_id.clear()
-        self.info_label.setText(
-           f"Seed IDs:\n"
-        )
+
 
     def delete_wire(self):
-
-        
-
-        indices = np.where(~self.valid_mask)[0]
-
-
-        
+        indices = np.where(~self.valid_mask)[0] 
         # 写回同一个数组名
         self.current_cloud[self.color_array_name][indices,3] = 0.0  # 设置为完全透明
-
         # 只更新 mapper，不要重新 add_mesh
         self.points_actor.GetMapper().ScalarVisibilityOn()
         self.points_actor.GetMapper().SetScalarModeToUsePointData()
