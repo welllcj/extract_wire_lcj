@@ -7,12 +7,12 @@ from scipy.spatial import cKDTree
 import time
 from collections import deque
 import os
-
+from newton import point_to_curve_distance_newton
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QPushButton, QFileDialog,
     QLabel, QHBoxLayout, QColorDialog,
-    QDoubleSpinBox, QToolButton, QFrame
+    QDoubleSpinBox, QToolButton, QFrame, QMessageBox
 )
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon
@@ -362,9 +362,15 @@ class MainWindow(QMainWindow):
         return wire_ids
     ### 曲线提取模式
     def extract_wire_curve_mode(self):
-        if len(self.seed_id) < 2:
-            print("曲线模式至少需要两个种子点")
-            return list(self.seed_id)
+        min_seed_num = 2
+
+        if len(self.seed_id) < min_seed_num:
+            QMessageBox.warning(
+                self,
+                "提示",
+                f"曲线模式至少需要 {min_seed_num} 个种子点"
+            )
+            return None
 
         start_time = time.perf_counter()
 
@@ -472,24 +478,16 @@ class MainWindow(QMainWindow):
 
 
             # ==========================================
-            # 4.3 当前中心点投影到当前拟合PCA方向，得到 t
+            # 4.4 用牛顿迭代法计算点到曲线的近似最短距离
             # ==========================================
-            t_p = np.dot(p - centroid_fit, direction_fit)
-
-            # ==========================================
-            # 4.4 将 t 回代到空间曲线方程，得到曲线上对应点 q
-            # ==========================================
-            q = np.zeros(3)
-            for i in range(order + 1):
-                q[0] += ax[i] * t_p**i
-                q[1] += ay[i] * t_p**i
-                q[2] += az[i] * t_p**i
-
-            # ==========================================
-            # 4.5 计算当前中心点与曲线对应点的距离
-            # ==========================================
-            dist_to_curve = np.linalg.norm(p - q)
-
+            dist_to_curve, q, t_p = point_to_curve_distance_newton(
+                p,
+                direction_fit,
+                centroid_fit,
+                ax, ay, az
+            )
+            print("点到曲线的距离：", dist_to_curve)
+            print("\n")
             if dist_to_curve > dist_thresh:
                 continue
 
@@ -606,7 +604,8 @@ class MainWindow(QMainWindow):
             wire_ids = self.extract_wire_curve_mode()
         else:
             return
-        
+        if wire_ids is None:
+            return 
         seed_indices= list(self.seed_id)
         # 清空种子点
         self.seed_id.clear()
