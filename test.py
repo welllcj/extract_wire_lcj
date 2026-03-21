@@ -156,7 +156,77 @@ class MainWindow(QMainWindow):
         self.update_mode_buttons()
 
     def save_point_cloud(self):
-        pass
+        if self.current_cloud is None:
+            print("当前没有点云可保存")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Point Cloud",
+            "",
+            "PointCloud (*.las *.ply *.pcd *.xyz)"
+        )
+
+        if not path:
+            return
+
+        # 只保存当前有效点
+        valid_indices = np.where(self.valid_mask)[0]
+
+        if len(valid_indices) == 0:
+            print("没有可保存的点")
+            return
+
+        save_points = self.current_points[valid_indices]
+
+        # ======================
+        # 保存 LAS
+        # ======================
+        if path.lower().endswith(".las"):
+            header = laspy.LasHeader(point_format=3, version="1.2")
+            las = laspy.LasData(header)
+
+            las.x = save_points[:, 0]
+            las.y = save_points[:, 1]
+            las.z = save_points[:, 2]
+
+            # 如果有颜色就保存颜色
+            if self.color_array_name is not None and self.color_array_name in self.current_cloud.array_names:
+                colors = self.current_cloud[self.color_array_name][valid_indices]
+
+                # 兼容 rgb / rgba
+                if colors.ndim == 2 and colors.shape[1] >= 3:
+                    rgb = colors[:, :3].copy()
+
+                    # 如果颜色是 0~1 浮点，转成 LAS 常用 0~65535
+                    if np.max(rgb) <= 1.0:
+                        rgb = (rgb * 65535).clip(0, 65535).astype(np.uint16)
+                    else:
+                        rgb = rgb.clip(0, 65535).astype(np.uint16)
+
+                    las.red = rgb[:, 0]
+                    las.green = rgb[:, 1]
+                    las.blue = rgb[:, 2]
+
+            las.write(path)
+            print(f"点云已保存到: {path}")
+            return
+
+        # ======================
+        # 保存 PLY / PCD / XYZ
+        # ======================
+        save_cloud = pv.PolyData(save_points)
+
+        # 如果有颜色则一起写入
+        if self.color_array_name is not None and self.color_array_name in self.current_cloud.array_names:
+            colors = self.current_cloud[self.color_array_name][valid_indices].copy()
+            save_cloud[self.color_array_name] = colors
+
+        try:
+            save_cloud.save(path)
+            print(f"点云已保存到: {path}")
+        except Exception as e:
+            print("保存失败:", e)
 
     
     def update_radius(self, value):
@@ -304,7 +374,7 @@ class MainWindow(QMainWindow):
 
         linearity_thresh = 0.75                      # 局部线性度阈值
         dist_thresh =  self.radus /2              # 点到拟合曲线对应点的距离阈值
-
+        direction_cos_thresh = 0.85
         refit_batch_size = 50                        # 每新增多少点重拟合一次
         frontier_k = 5                               # 每端选几个前沿点
 
@@ -400,6 +470,7 @@ class MainWindow(QMainWindow):
 
             local_dir = local_eigvecs[:, 0]
 
+
             # ==========================================
             # 4.3 当前中心点投影到当前拟合PCA方向，得到 t
             # ==========================================
@@ -421,6 +492,29 @@ class MainWindow(QMainWindow):
 
             if dist_to_curve > dist_thresh:
                 continue
+
+              # ==========================================
+            # 当前 t_p 处的曲线切向
+            # ==========================================
+            curve_tangent = np.zeros(3)
+            for i in range(1, order + 1):
+                curve_tangent[0] += i * ax[i] * t_p**(i - 1)
+                curve_tangent[1] += i * ay[i] * t_p**(i - 1)
+                curve_tangent[2] += i * az[i] * t_p**(i - 1)
+
+            tangent_norm = np.linalg.norm(curve_tangent)
+            if tangent_norm < 1e-12:
+                continue
+
+            curve_tangent = curve_tangent / tangent_norm
+
+            # ==========================================
+            # 局部方向和曲线切向保持一致，避免走分支
+            # ==========================================
+            cos_theta = abs(np.dot(local_dir, curve_tangent))
+            if cos_theta < direction_cos_thresh:
+                continue
+
 
             # ==========================================
             # 4.6 当前中心点满足条件，则这一球邻域默认都接收
