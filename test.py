@@ -1,3 +1,4 @@
+from configparser import NoOptionError
 import sys
 import numpy as np
 import pyvista as pv
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QPushButton, QFileDialog,
     QLabel, QHBoxLayout, QColorDialog,
-    QDoubleSpinBox, QToolButton, QFrame, QMessageBox
+    QDoubleSpinBox, QToolButton, QFrame, QMessageBox,QCheckBox
 )
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon
@@ -45,6 +46,8 @@ class MainWindow(QMainWindow):
         self.radius_box.setValue(self.radus)
         self.radius_box.valueChanged.connect(self.update_radius)
 
+        self.adaptive_radius_checkbox = QCheckBox("是否自适应半径")
+        self.adaptive_radius_checkbox.setChecked(False)   # 默认不勾选
 
 
 
@@ -54,6 +57,7 @@ class MainWindow(QMainWindow):
         self.undo_btn.clicked.connect(self.undo_last)
         self.save_btn.clicked.connect(self.save_point_cloud)
         self.load_btn.clicked.connect(self.load_point_cloud)
+        self.adaptive_radius_checkbox.stateChanged.connect(self.on_adaptive_radius_changed)
 
         left_panel.addWidget(self.delete_btn)
         left_panel.addWidget(self.extract_btn)
@@ -63,6 +67,7 @@ class MainWindow(QMainWindow):
         left_panel.addWidget(self.save_btn)
         left_panel.addWidget(QLabel("Wire Radius"))
         left_panel.addWidget(self.radius_box)
+        left_panel.addWidget(self.adaptive_radius_checkbox)
         left_panel.addWidget(self.info_label)
 
 
@@ -136,6 +141,18 @@ class MainWindow(QMainWindow):
         self.points_actor = None
         self.undo_stack = []
         self.color = None
+
+
+        self.current_cloud = None
+        self.current_points = None
+        self.kdtree = None
+        self.valid_mask = None
+        self.color_array_name = None
+        self.use_adaptive_radius = False  ###是否是自适应半径模式
+
+    def on_adaptive_radius_changed(self, state):
+        self.use_adaptive_radius = self.adaptive_radius_checkbox.isChecked()
+        print("是否自适应半径：", self.use_adaptive_radius)
 
     def update_mode_buttons(self):
         if self.extract_mode == "point":
@@ -261,6 +278,298 @@ class MainWindow(QMainWindow):
         self.points_actor.GetMapper().ScalarVisibilityOn()
         self.plotter.render()
 
+    ### 估计导线半径
+    def estimate_structure_radius(self):
+        """
+        估计导线半径（统一使用：5m球查询 + 截面最近点 + 圆拟合）
+        返回: radius
+        """
+
+        seed_ids = list(self.seed_id)
+        radius_list = []
+
+        for pid in seed_ids:
+            p = self.current_points[pid]
+
+            # 1) 扫描球半径：用线性度选择主方向，并找出“候选导线半径”
+            #    线性度定义： (eig0 - eig1) / eig0
+            direction = None
+            linearity_best = -np.inf
+            best_rr = None
+            selected_rr = None
+
+            # 线性度阈值：你的大胆想法
+            linearity_threshold = 0.85
+
+            # 从 0.05 开始枚举，步长 0.05
+            r_list = np.arange(0.05, 5.0 + 1e-9, 0.05)
+            for rr in r_list:
+                sphere_idxs = self.kdtree.query_ball_point(p, r=rr)
+                sphere_idxs = [i for i in sphere_idxs if self.valid_mask[i]]
+
+                if len(sphere_idxs) < 10:
+                    continue
+
+                pts = self.current_points[sphere_idxs]
+                center = pts.mean(axis=0)
+                cov = np.cov((pts - center).T)
+                eigvals, eigvecs = np.linalg.eigh(cov)
+
+                order = np.argsort(eigvals)[::-1]
+                eigvals = eigvals[order]
+                eigvecs = eigvecs[:, order]
+
+                if eigvals[0] < 1e-12:
+                    continue
+
+                denom = max(eigvals[0], 1e-12)
+                linearity = (eigvals[0] - eigvals[1]) / denom
+
+                print(
+                    f"[radius] seed={pid} rr={rr:.2f} sphere_n={len(sphere_idxs)} linearity={linearity:.6f} "
+                    f"current_best={linearity_best:.6f}"
+                )
+
+                if linearity > linearity_threshold:
+                    selected_rr = float(rr)
+                    linearity_best = linearity
+                    direction = eigvecs[:, 0]
+                    best_rr = rr
+                    print(
+                        f"[radius] seed={pid} 命中阈值: rr={rr:.2f}, "
+                        f"linearity={linearity:.6f} (> {linearity_threshold})，将 rr 视为导线半径并停止扫描"
+                    )
+                    break
+
+                if linearity > linearity_best:
+                    print(
+                        f"[radius] seed={pid} 更新方向: rr={rr:.2f}, "
+                        f"sphere_n={len(sphere_idxs)}, linearity={linearity:.6f}, "
+                        f"prev_linear={linearity_best:.6f}"
+                    )
+                    linearity_best = linearity
+                    direction = eigvecs[:, 0]
+                    best_rr = rr
+
+            # 若KNN和扫描都失败，则跳过该种子点
+            if direction is None:
+                continue
+
+            # 不可视化时，打印方向（从种子点出发便于你核对）
+            p_end = p + direction * 1.0
+            print(
+                f"[radius] seed={pid} direction={direction} p_end={p_end} "
+                f"linearity_best={linearity_best:.6f} best_rr={best_rr}"
+            )
+
+            # 你的大胆想法：一旦命中线性度阈值，用该半径直接作为导线半径
+            if selected_rr is not None:
+                radius_list.append(selected_rr)
+                print(f"[radius] seed={pid} 直接返回半径: {selected_rr:.6f}")
+                continue
+
+            # 2) 5m球查询获取很多邻居点
+            sphere_idxs = self.kdtree.query_ball_point(p, r=5.0)
+            sphere_idxs = [i for i in sphere_idxs if self.valid_mask[i]]
+
+            if len(sphere_idxs) < 50:
+                continue
+
+            sphere_pts = self.current_points[sphere_idxs]
+
+            # 3) 截面平面：过种子点p，法向量为主方向direction
+            #    距离该平面的距离越小，越接近“截面薄片”
+            sphere_vecs = sphere_pts - p
+            plane_dist = np.abs(sphere_vecs @ direction)
+
+            order_idx = np.argsort(plane_dist)
+            if len(order_idx) < 10:
+                print(f"[radius] seed={pid} 有效截面候选点不足10，跳过")
+                continue
+
+            # 4) 构造截面平面两个正交基 e1, e2
+            tmp = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(tmp, direction)) > 0.9:
+                tmp = np.array([0.0, 1.0, 0.0])
+
+            e1 = np.cross(direction, tmp)
+            e1_norm = np.linalg.norm(e1)
+            if e1_norm < 1e-12:
+                continue
+            e1 = e1 / e1_norm
+
+            e2 = np.cross(direction, e1)
+            e2_norm = np.linalg.norm(e2)
+            if e2_norm < 1e-12:
+                continue
+            e2 = e2 / e2_norm
+
+            # 5) n_fit从10到80（步长5）全部尝试，得到多个半径候选
+            candidate_radius = []
+            n_fit_list = list(range(10, 81, 5))
+            print(f"[radius] seed={pid} 开始扫描 n_fit: {n_fit_list}")
+
+            for n_fit in n_fit_list:
+                if len(order_idx) < n_fit:
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, 可用点不足，跳过")
+                    continue
+
+                fit_idx = order_idx[:n_fit]
+                slice_pts = sphere_pts[fit_idx]
+                if len(slice_pts) < 10:
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, slice点不足10，跳过")
+                    continue
+
+                slice_vecs = slice_pts - p
+                u = slice_vecs @ e1
+                v = slice_vecs @ e2
+                pts2d = np.column_stack([u, v])
+                n2 = len(pts2d)
+
+                if n2 < 10:
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, 投影点不足10，跳过")
+                    continue
+
+                # ---- DBSCAN（纯numpy实现）----
+                nearest_dists = np.empty(n2, dtype=float)
+                for i in range(n2):
+                    diff = pts2d - pts2d[i]
+                    d2 = np.sum(diff * diff, axis=1)
+                    d2[i] = np.inf
+                    nearest_dists[i] = np.sqrt(np.min(d2))
+
+                eps = float(np.percentile(nearest_dists, 20) * 2.5)
+                eps = max(0.05, eps)
+                eps = min(eps, max(0.2, 2.0 * self.radus))
+                eps2 = eps * eps
+
+                min_samples = max(6, int(0.12 * n2))
+                min_samples = min(min_samples, 12)
+
+                labels = -np.ones(n2, dtype=int)
+                visited = np.zeros(n2, dtype=bool)
+                cluster_id = 0
+
+                def region_query(idx):
+                    diff = pts2d - pts2d[idx]
+                    d2 = np.sum(diff * diff, axis=1)
+                    return np.where(d2 <= eps2)[0]
+
+                for i in range(n2):
+                    if visited[i]:
+                        continue
+                    visited[i] = True
+
+                    neighbors = region_query(i)
+                    if len(neighbors) < min_samples:
+                        labels[i] = -1
+                        continue
+
+                    labels[i] = cluster_id
+                    seed_queue = list(neighbors.tolist())
+                    q_pos = 0
+
+                    while q_pos < len(seed_queue):
+                        j = seed_queue[q_pos]
+                        q_pos += 1
+
+                        if not visited[j]:
+                            visited[j] = True
+                            neighbors_j = region_query(j)
+                            if len(neighbors_j) >= min_samples:
+                                for jj in neighbors_j.tolist():
+                                    if labels[jj] == -1:
+                                        labels[jj] = cluster_id
+                                    if jj not in seed_queue:
+                                        seed_queue.append(jj)
+
+                        if labels[j] == -1:
+                            labels[j] = cluster_id
+
+                    cluster_id += 1
+
+                best_label = -1
+                best_count = 0
+                for cid in range(cluster_id):
+                    cnt = int(np.sum(labels == cid))
+                    if cnt > best_count:
+                        best_count = cnt
+                        best_label = cid
+
+                if best_label < 0 or best_count < 10:
+                    pts_cluster = pts2d
+                else:
+                    pts_cluster = pts2d[labels == best_label]
+
+                m = len(pts_cluster)
+                if m < 3:
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, 聚类后点过少，跳过")
+                    continue
+
+                best_area = np.inf
+                best_diag = np.inf
+                for i in range(m):
+                    for j in range(i + 1, m):
+                        vec = pts_cluster[j] - pts_cluster[i]
+                        norm = np.linalg.norm(vec)
+                        if norm < 1e-12:
+                            continue
+
+                        ux = vec / norm
+                        uy = np.array([-ux[1], ux[0]], dtype=float)
+                        xproj = pts_cluster @ ux
+                        yproj = pts_cluster @ uy
+
+                        dx = float(np.max(xproj) - np.min(xproj))
+                        dy = float(np.max(yproj) - np.min(yproj))
+                        area = dx * dy
+                        diag = float(np.hypot(dx, dy))
+                        if area < best_area:
+                            best_area = area
+                            best_diag = diag
+
+                if not np.isfinite(best_diag):
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, best_diag无效，跳过")
+                    continue
+
+                r_est = 0.5 * best_diag
+                if r_est <= 0 or not np.isfinite(r_est):
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, r_est无效，跳过")
+                    continue
+
+                candidate_radius.append((n_fit, r_est))
+                print(
+                    f"[radius] seed={pid}, n_fit={n_fit}, "
+                    f"eps={eps:.4f}, cluster_size={m}, r_est={r_est:.6f}"
+                )
+
+            if len(candidate_radius) == 0:
+                print(f"[radius] seed={pid} 没有可用候选半径，跳过")
+                continue
+
+            # 6) 在所有n_fit候选中，选“最合适”的半径：
+            #    采用稳健准则：离候选半径中位数最近
+            cand_vals = np.array([x[1] for x in candidate_radius], dtype=float)
+            cand_med = float(np.median(cand_vals))
+            best_idx = int(np.argmin(np.abs(cand_vals - cand_med)))
+            best_n_fit, best_r = candidate_radius[best_idx]
+
+            print(
+                f"[radius] seed={pid} 选择结果: n_fit={best_n_fit}, "
+                f"r={best_r:.6f}, cand_median={cand_med:.6f}, "
+                f"candidate_num={len(candidate_radius)}, linearity_best={linearity_best:.6f}"
+            )
+            radius_list.append(best_r)
+
+        if len(radius_list) == 0:
+            return self.radus
+
+        radius = np.median(radius_list)
+
+        
+        return radius
+
+
     ### 点模式
     def extract_wire_point_mode(self):
         visited = set(self.seed_id)
@@ -310,7 +619,7 @@ class MainWindow(QMainWindow):
             print(f"线性度：{linearity}")
 
             # 当前局部不像导线，就不扩
-            if linearity < 0.75:
+            if linearity < 0.7:
                 continue
 
             # 3. 新增：和父节点方向做连续性约束
@@ -360,6 +669,130 @@ class MainWindow(QMainWindow):
 
         wire_ids = list(visited)
         return wire_ids
+    
+    def process_representative_points_and_neighbors(
+        self,
+        rep_local_idx,
+        local_pts,
+        local_neighbors,
+        visited,
+        local_dir,
+        direction_fit,
+        centroid_fit,
+        ax, ay, az,
+        order,
+        dist_thresh,
+        direction_cos_thresh
+    ):
+        """
+        处理代表点与邻居点：
+        1. 先检查所有代表点是否都满足条件
+        2. 如果全部满足，则当前邻域整体接收
+        3. 如果有任意一个不满足，则对所有邻居点逐个检查
+        返回:
+            accepted_ids: 最终接收的点编号列表
+            t_values: 通过检查时对应的曲线参数t列表
+            all_rep_pass: 代表点是否全部通过
+        """
+
+        rep_t_values = []
+        all_rep_pass = True
+
+        # =========================
+        # 1) 先检查所有代表点
+        # =========================
+        for ridx in rep_local_idx:
+            rp = local_pts[ridx]
+
+            dist_r, q_r, t_r = point_to_curve_distance_newton(
+                rp,
+                direction_fit,
+                centroid_fit,
+                ax, ay, az
+            )
+
+            if not np.isfinite(dist_r):
+                all_rep_pass = False
+                break
+
+            # 计算 t_r 处曲线切向
+            curve_tangent_r = np.zeros(3)
+            for i in range(1, order + 1):
+                curve_tangent_r[0] += i * ax[i] * (t_r ** (i - 1))
+                curve_tangent_r[1] += i * ay[i] * (t_r ** (i - 1))
+                curve_tangent_r[2] += i * az[i] * (t_r ** (i - 1))
+
+            tangent_norm_r = np.linalg.norm(curve_tangent_r)
+            if tangent_norm_r < 1e-12:
+                all_rep_pass = False
+                break
+
+            curve_tangent_r = curve_tangent_r / tangent_norm_r
+            cos_r = abs(np.dot(local_dir, curve_tangent_r))
+
+            if dist_r > dist_thresh or cos_r < direction_cos_thresh:
+                all_rep_pass = False
+                break
+
+            rep_t_values.append(t_r)
+
+        accepted_ids = []
+
+        # =========================
+        # 2) 如果所有代表点都通过，则整团接收
+        # =========================
+        if all_rep_pass:
+            for nid in local_neighbors:
+                if nid not in visited:
+                    accepted_ids.append(nid)
+
+            return accepted_ids, rep_t_values, True
+
+        # =========================
+        # 3) 如果代表点没有全部通过，则逐点检查所有邻居点
+        # =========================
+        t_values = []
+
+        for nid in local_neighbors:
+            if nid in visited:
+                continue
+
+            np_point = self.current_points[nid]
+
+            dist_i, q_i, t_i = point_to_curve_distance_newton(
+                np_point,
+                direction_fit,
+                centroid_fit,
+                ax, ay, az
+            )
+
+            if not np.isfinite(dist_i):
+                continue
+
+            if dist_i > dist_thresh:
+                continue
+
+            curve_tangent_i = np.zeros(3)
+            for j in range(1, order + 1):
+                curve_tangent_i[0] += j * ax[j] * (t_i ** (j - 1))
+                curve_tangent_i[1] += j * ay[j] * (t_i ** (j - 1))
+                curve_tangent_i[2] += j * az[j] * (t_i ** (j - 1))
+
+            tangent_norm_i = np.linalg.norm(curve_tangent_i)
+            if tangent_norm_i < 1e-12:
+                continue
+
+            curve_tangent_i = curve_tangent_i / tangent_norm_i
+            cos_i = abs(np.dot(local_dir, curve_tangent_i))
+
+            if cos_i < direction_cos_thresh:
+                continue
+
+            accepted_ids.append(nid)
+            t_values.append(t_i)
+
+        return accepted_ids, t_values, False
+
     ### 曲线提取模式
     def extract_wire_curve_mode(self):
         min_seed_num = 2
@@ -378,8 +811,8 @@ class MainWindow(QMainWindow):
         # 参数设置
         # =========================
 
-        linearity_thresh = 0.75                      # 局部线性度阈值
-        dist_thresh =  self.radus /2              # 点到拟合曲线对应点的距离阈值
+        linearity_thresh = 0.7                    # 局部线性度阈值
+        dist_thresh =  self.radus / 2              # 点到拟合曲线对应点的距离阈值
         direction_cos_thresh = 0.85
         refit_batch_size = 50                        # 每新增多少点重拟合一次
         frontier_k = 5                               # 每端选几个前沿点
@@ -431,6 +864,7 @@ class MainWindow(QMainWindow):
         # =========================
         visited = set(seed_ids)
         queue = deque(seed_ids)
+        queued = set(seed_ids)
 
         new_added_since_refit = 0
         refit_count = 0
@@ -439,9 +873,9 @@ class MainWindow(QMainWindow):
         # 4. 区域生长
         # =========================
         while queue:
-            if time.perf_counter() - start_time > 10:
-                print("曲线提取超时 10 秒，提前结束")
-                break
+            # if time.perf_counter() - start_time > 10:
+            #     print("曲线提取超时 10 秒，提前结束")
+            #     break
 
             pid = queue.popleft()
             p = self.current_points[pid]
@@ -551,7 +985,9 @@ class MainWindow(QMainWindow):
                     frontier.add(int(accepted_ids[idx]))
 
             for fid in frontier:
-                queue.append(fid)
+                if fid not in queued:
+                    queue.append(fid)
+                    queued.add(fid)
 
             # ==========================================
             # 4.8 生长一定数量后重新拟合
@@ -597,6 +1033,26 @@ class MainWindow(QMainWindow):
     def extract_wire(self):
         if len(self.seed_id) == 0:
             return
+
+
+        # =========================
+        # 自适应：直接估计导线半径
+        # =========================
+        if self.use_adaptive_radius:
+            new_radius = self.estimate_structure_radius()
+            print("估计半径：", new_radius)
+
+            self.radus = new_radius 
+            self.radius_box.blockSignals(True)
+            self.radius_box.setValue(self.radus)
+            self.radius_box.blockSignals(False)
+
+            QMessageBox.information(
+                self,
+                "半径估计成功",
+                f"估计导线半径为：{new_radius:.4f}"
+            )
+
 
         if self.extract_mode == "point":
             wire_ids = self.extract_wire_point_mode()
@@ -670,24 +1126,9 @@ class MainWindow(QMainWindow):
         if self.current_cloud is None:
             return
 
-        n_points = len(self.current_points)
-
-        # ===== 情况1：原本有颜色 =====
-        if self.color_array_name is not None:
-            colors = self.current_cloud[self.color_array_name].copy()
-
-        # ===== 情况2：原本没颜色 =====
-        else:
-            # 深灰色，不要白色
-            colors = np.full((n_points, 3), 0.3)
-            self.color_array_name = "rgb"
-            self.current_cloud[self.color_array_name] = colors
-
-        # ===== 设置导线为红色 =====
-        colors[indices] = [1, 0, 0, 1]   # 红色，完全不透明
 
         # 写回同一个数组名
-        self.current_cloud[self.color_array_name] = colors
+        self.current_cloud[self.color_array_name][indices,:] = [1, 0, 0, 1]
 
         # 只更新 mapper，不要重新 add_mesh
         self.points_actor.GetMapper().ScalarVisibilityOn()
@@ -776,6 +1217,16 @@ class MainWindow(QMainWindow):
 
         if point_id < 0:
             return
+
+       
+        if self.color_array_name is None:
+            self.color_array_name = "rgb"
+            n_points = len(self.current_points)
+            rgba = np.ones((n_points, 4))
+            rgba[:, :3] = 0.3   # 默认灰色
+            self.current_cloud[self.color_array_name] = rgba
+
+       
 
         if not self.valid_mask[point_id]:
             print("点击了无效点，忽略")
