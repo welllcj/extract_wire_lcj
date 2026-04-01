@@ -812,7 +812,6 @@ class MainWindow(QMainWindow):
         # =========================
 
         linearity_thresh = 0.7                    # 局部线性度阈值
-        dist_thresh =  self.radus / 2              # 点到拟合曲线对应点的距离阈值
         direction_cos_thresh = 0.85
         refit_batch_size = 50                        # 每新增多少点重拟合一次
         frontier_k = 5                               # 每端选几个前沿点
