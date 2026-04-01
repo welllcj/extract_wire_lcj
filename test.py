@@ -1004,29 +1004,28 @@ class MainWindow(QMainWindow):
             new_added_since_refit += len(accepted_ids)
 
             # ==========================================
-            # 4.7 从当前邻域里选前沿点
-            #     选距离中心较远，并且在局部PCA方向两端的点
+            # 4.7 优化前沿点选择：基于曲线切向而非局部PCA方向
             # ==========================================
-            accepted_ids = np.array(accepted_ids)
-            accepted_pts = self.current_points[accepted_ids]
+            accepted_ids_arr = np.array(accepted_ids)
+            accepted_pts = self.current_points[accepted_ids_arr]
 
             vecs = accepted_pts - p
-            proj = vecs @ local_dir
+            proj = vecs @ curve_tangent
 
             frontier = set()
 
-            if len(accepted_ids) <= 2:
-                for idx in accepted_ids:
+            if len(accepted_ids_arr) <= 2:
+                for idx in accepted_ids_arr:
                     frontier.add(int(idx))
             else:
                 sort_idx = np.argsort(proj)
                 k = min(frontier_k, len(sort_idx))
 
                 for idx in sort_idx[:k]:
-                    frontier.add(int(accepted_ids[idx]))
+                    frontier.add(int(accepted_ids_arr[idx]))
 
                 for idx in sort_idx[-k:]:
-                    frontier.add(int(accepted_ids[idx]))
+                    frontier.add(int(accepted_ids_arr[idx]))
 
             for fid in frontier:
                 if fid not in queued:
