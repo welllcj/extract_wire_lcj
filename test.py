@@ -949,9 +949,36 @@ class MainWindow(QMainWindow):
 
 
             # ==========================================
-            # 4.6 当前中心点满足条件，则这一球邻域默认都接收
+            # 4.6 引入代表点预检机制
             # ==========================================
-            accepted_ids = [i for i in local_neighbors if i not in visited]
+            candidate_ids = [i for i in local_neighbors if i not in visited]
+
+            if len(candidate_ids) == 0:
+                continue
+
+            # 选择代表点：距离中心点较远的点
+            candidate_pts = self.current_points[candidate_ids]
+            dists_to_center = np.linalg.norm(candidate_pts - p, axis=1)
+
+            # 选择距离最远的几个点作为代表点
+            num_representatives = min(5, len(candidate_ids))
+            rep_indices = np.argsort(dists_to_center)[-num_representatives:]
+            rep_local_idx = rep_indices  # 在candidate_ids中的索引
+
+            # 调用代表点检查函数
+            accepted_ids, t_values, all_rep_pass = self.process_representative_points_and_neighbors(
+                rep_local_idx,
+                candidate_pts,
+                candidate_ids,
+                visited,
+                local_dir,
+                direction_fit,
+                centroid_fit,
+                ax, ay, az,
+                order,
+                dist_thresh,
+                direction_cos_thresh
+            )
 
             if len(accepted_ids) == 0:
                 continue
