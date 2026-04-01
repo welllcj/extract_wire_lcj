@@ -859,6 +859,24 @@ class MainWindow(QMainWindow):
         az = np.linalg.lstsq(A, pts[:, 2], rcond=None)[0]
 
         # =========================
+        # 2.5 基于种子点估计结构厚度，用于自适应距离阈值
+        # =========================
+        seed_radial_dists = []
+        for sid in seed_ids:
+            sp = self.current_points[sid]
+            vecs = pts - centroid_fit
+            proj = vecs @ direction_fit
+            perp = vecs - np.outer(proj, direction_fit)
+            d_perp = np.linalg.norm(perp, axis=1)
+            seed_radial_dists.extend(d_perp)
+
+        if len(seed_radial_dists) > 0:
+            structure_thickness = np.percentile(seed_radial_dists, 75)
+            dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
+        else:
+            dist_thresh = self.radus / 2
+
+        # =========================
         # 3. 初始化
         # =========================
         visited = set(seed_ids)
