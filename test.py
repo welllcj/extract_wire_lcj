@@ -850,7 +850,13 @@ class MainWindow(QMainWindow):
             return list(self.seed_id)
 
         n = len(pts)
-        order = min(3, max(1, n // 5))
+        # 动态调整多项式阶数：点数少用低阶，点数多用高阶
+        if n < 5:
+            order = 1
+        elif n < 15:
+            order = 2
+        else:
+            order = min(4, max(2, n // 15))
 
         A = np.vstack([t**i for i in range(order + 1)]).T
 
