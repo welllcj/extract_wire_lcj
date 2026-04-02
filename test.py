@@ -1076,7 +1076,13 @@ class MainWindow(QMainWindow):
 
                         if np.max(t) - np.min(t) > 1e-8:
                             n = len(pts)
-                            order = min(3, max(1, n // 20))
+                            # 重拟合时也使用动态阶数
+                            if n < 50:
+                                order = 2
+                            elif n < 200:
+                                order = 3
+                            else:
+                                order = min(4, max(2, n // 50))
 
                             A = np.vstack([t**i for i in range(order + 1)]).T
 
