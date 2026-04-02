@@ -871,7 +871,10 @@ class MainWindow(QMainWindow):
             seed_radial_dists.extend(d_perp)
 
         if len(seed_radial_dists) > 0:
-            structure_thickness = np.percentile(seed_radial_dists, 75)
+            # 使用中位数绝对偏差(MAD)提高鲁棒性
+            median_dist = np.median(seed_radial_dists)
+            mad = np.median(np.abs(seed_radial_dists - median_dist))
+            structure_thickness = median_dist + 1.5 * mad
             dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
         else:
             dist_thresh = self.radus / 2
