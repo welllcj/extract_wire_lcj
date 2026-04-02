@@ -1377,10 +1377,39 @@ class MainWindow(QMainWindow):
 
         wire_ids = list(visited)
 
+        # =========================
+        # 后处理：移除孤立点和噪声
+        # =========================
+        if len(wire_ids) > 10:
+            wire_pts = self.current_points[wire_ids]
+
+            # 构建提取点的KDTree
+            wire_kdtree = cKDTree(wire_pts)
+
+            # 计算每个点的邻居数量（使用较小的半径）
+            neighbor_radius = self.radus * 0.8
+            neighbor_counts = []
+            for i, wpt in enumerate(wire_pts):
+                neighbors = wire_kdtree.query_ball_point(wpt, r=neighbor_radius)
+                neighbor_counts.append(len(neighbors))
+
+            neighbor_counts = np.array(neighbor_counts)
+
+            # 移除邻居数量过少的孤立点
+            min_neighbors = max(3, int(np.percentile(neighbor_counts, 10)))
+            valid_mask = neighbor_counts >= min_neighbors
+
+            if np.sum(valid_mask) >= len(wire_ids) * 0.8:  # 至少保留80%的点
+                wire_ids = [wid for wid, valid in zip(wire_ids, valid_mask) if valid]
+                removed_count = np.sum(~valid_mask)
+                if removed_count > 0:
+                    print(f"后处理：移除 {removed_count} 个孤立点")
+
         # 输出最终统计信息
         if total_checked > 0:
             acceptance_rate = total_accepted / total_checked * 100
             print(f"提取完成：迭代 {iteration_count} 次，检查 {total_checked} 个候选点，接收 {total_accepted} 个 ({acceptance_rate:.1f}%)")
+            print(f"最终提取点数: {len(wire_ids)}")
 
         if iteration_count >= max_iterations:
             print(f"警告：达到最大迭代次数 {max_iterations}，提前终止")
