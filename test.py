@@ -1481,7 +1481,7 @@ class MainWindow(QMainWindow):
         wire_ids = list(visited)
 
         # =========================
-        # 后处理：移除孤立点和噪声
+        # 后处理：移除孤立点和噪声，保留最大连通分量
         # =========================
         if len(wire_ids) > 10:
             wire_pts = self.current_points[wire_ids]
@@ -1489,7 +1489,7 @@ class MainWindow(QMainWindow):
             # 构建提取点的KDTree
             wire_kdtree = cKDTree(wire_pts)
 
-            # 计算每个点的邻居数量（使用较小的半径）
+            # 第一步：移除邻居数量过少的孤立点
             neighbor_radius = self.radus * 0.8
             neighbor_counts = []
             for i, wpt in enumerate(wire_pts):
@@ -1503,10 +1503,56 @@ class MainWindow(QMainWindow):
             valid_mask = neighbor_counts >= min_neighbors
 
             if np.sum(valid_mask) >= len(wire_ids) * 0.8:  # 至少保留80%的点
-                wire_ids = [wid for wid, valid in zip(wire_ids, valid_mask) if valid]
+                wire_ids_filtered = [wid for wid, valid in zip(wire_ids, valid_mask) if valid]
                 removed_count = np.sum(~valid_mask)
                 if removed_count > 0:
-                    print(f"后处理：移除 {removed_count} 个孤立点")
+                    print(f"后处理步骤1：移除 {removed_count} 个孤立点")
+            else:
+                wire_ids_filtered = wire_ids
+
+            # 第二步：连通性分析，保留最大连通分量
+            if len(wire_ids_filtered) > 20:
+                filtered_pts = self.current_points[wire_ids_filtered]
+                filtered_kdtree = cKDTree(filtered_pts)
+
+                # 使用BFS找连通分量
+                visited_conn = np.zeros(len(wire_ids_filtered), dtype=bool)
+                components = []
+                conn_radius = self.radus * 1.2
+
+                for i in range(len(wire_ids_filtered)):
+                    if visited_conn[i]:
+                        continue
+
+                    # BFS
+                    component = []
+                    queue_conn = deque([i])
+                    visited_conn[i] = True
+
+                    while queue_conn:
+                        idx = queue_conn.popleft()
+                        component.append(idx)
+
+                        pt = filtered_pts[idx]
+                        neighbors = filtered_kdtree.query_ball_point(pt, r=conn_radius)
+
+                        for nidx in neighbors:
+                            if not visited_conn[nidx]:
+                                visited_conn[nidx] = True
+                                queue_conn.append(nidx)
+
+                    components.append(component)
+
+                # 保留最大连通分量
+                if len(components) > 1:
+                    largest_component = max(components, key=len)
+                    wire_ids = [wire_ids_filtered[i] for i in largest_component]
+                    removed_components = len(components) - 1
+                    print(f"后处理步骤2：保留最大连通分量，移除 {removed_components} 个小分量")
+                else:
+                    wire_ids = wire_ids_filtered
+            else:
+                wire_ids = wire_ids_filtered
 
         # 输出最终统计信息
         if total_checked > 0:
