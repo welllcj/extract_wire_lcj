@@ -1089,6 +1089,11 @@ class MainWindow(QMainWindow):
         stagnation_count = 0
         check_interval = 100  # 每100次迭代检查一次
 
+        # 距离阈值历史：用于平滑调整
+        dist_thresh_history = deque([dist_thresh], maxlen=5)
+        min_dist_thresh = self.radus * 0.3  # 最小阈值
+        max_dist_thresh = self.radus * 2.0  # 最大阈值
+
         # =========================
         # 4. 区域生长
         # =========================
@@ -1430,19 +1435,28 @@ class MainWindow(QMainWindow):
                             ay = np.linalg.lstsq(A, pts[:, 1], rcond=None)[0]
                             az = np.linalg.lstsq(A, pts[:, 2], rcond=None)[0]
 
-                            # 重新估计结构厚度（使用MAD）
+                            # 重新估计结构厚度（使用MAD），并平滑调整阈值
                             vecs = pts - centroid_fit
                             proj = vecs @ direction_fit
                             perp = vecs - np.outer(proj, direction_fit)
                             d_perp = np.linalg.norm(perp, axis=1)
                             median_dist = np.median(d_perp)
                             mad = np.median(np.abs(d_perp - median_dist))
-                            structure_thickness = median_dist + 2.0 * mad  # 增加容忍度
-                            dist_thresh = max(structure_thickness * 1.5, self.radus * 0.4)  # 更宽松
+                            structure_thickness = median_dist + 2.0 * mad
+
+                            # 计算新的距离阈值
+                            new_dist_thresh = max(structure_thickness * 1.5, self.radus * 0.4)
+
+                            # 平滑调整：与历史阈值加权平均
+                            dist_thresh_history.append(new_dist_thresh)
+                            smoothed_thresh = np.mean(dist_thresh_history)
+
+                            # 限制在合理范围内
+                            dist_thresh = np.clip(smoothed_thresh, min_dist_thresh, max_dist_thresh)
 
                             refit_count += 1
                             consecutive_failures = 0  # 重拟合后重置失败计数
-                            print(f"完成第 {refit_count} 次重拟合，当前点数: {len(visited)}, 距离阈值: {dist_thresh:.4f}")
+                            print(f"完成第 {refit_count} 次重拟合，当前点数: {len(visited)}, 距离阈值: {dist_thresh:.4f} (平滑后)")
 
                 new_added_since_refit = 0
 
