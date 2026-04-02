@@ -1033,8 +1033,7 @@ class MainWindow(QMainWindow):
                     queued.add(fid)
 
             # ==========================================
-            # 4.8 生长一定数量后重新拟合
-            #     更新 centroid_fit, direction_fit, 曲线参数方程
+            # 4.8 生长一定数量后重新拟合，并更新距离阈值
             # ==========================================
             if new_added_since_refit >= refit_batch_size:
                 pts = self.current_points[list(visited)]
@@ -1052,7 +1051,6 @@ class MainWindow(QMainWindow):
                     if eigvals[0] > 1e-12:
                         direction_fit = eigvecs[:, 0]
 
-                        # 方案A：重新用新的 PCA 投影坐标作为参数 t
                         t = (pts - centroid_fit) @ direction_fit
 
                         if np.max(t) - np.min(t) > 1e-8:
@@ -1065,8 +1063,16 @@ class MainWindow(QMainWindow):
                             ay = np.linalg.lstsq(A, pts[:, 1], rcond=None)[0]
                             az = np.linalg.lstsq(A, pts[:, 2], rcond=None)[0]
 
+                            # 重新估计结构厚度
+                            vecs = pts - centroid_fit
+                            proj = vecs @ direction_fit
+                            perp = vecs - np.outer(proj, direction_fit)
+                            d_perp = np.linalg.norm(perp, axis=1)
+                            structure_thickness = np.percentile(d_perp, 75)
+                            dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
+
                             refit_count += 1
-                            print(f"完成第 {refit_count} 次重拟合，当前点数: {len(visited)}")
+                            print(f"完成第 {refit_count} 次重拟合，当前点数: {len(visited)}, 距离阈值: {dist_thresh:.4f}")
 
                 new_added_since_refit = 0
 
