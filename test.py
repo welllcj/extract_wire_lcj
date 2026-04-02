@@ -1062,11 +1062,31 @@ class MainWindow(QMainWindow):
         adaptive_search_radius = self.radus
         radius_adjustment_count = 0
 
+        # 早停机制：检测生长停滞
+        last_visited_count = len(visited)
+        stagnation_count = 0
+        check_interval = 100  # 每100次迭代检查一次
+
         # =========================
         # 4. 区域生长
         # =========================
         while queue and iteration_count < max_iterations:
             iteration_count += 1
+
+            # 早停检查：每隔一定迭代检查生长是否停滞
+            if iteration_count % check_interval == 0:
+                current_visited_count = len(visited)
+                growth = current_visited_count - last_visited_count
+
+                if growth < check_interval * 0.05:  # 增长率低于5%
+                    stagnation_count += 1
+                    if stagnation_count >= 3:  # 连续3次检查都停滞
+                        print(f"早停：生长停滞，迭代 {iteration_count} 次后终止")
+                        break
+                else:
+                    stagnation_count = 0  # 重置停滞计数
+
+                last_visited_count = current_visited_count
 
             pid = queue.popleft()
             p = self.current_points[pid]
