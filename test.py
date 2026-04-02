@@ -766,10 +766,7 @@ class MainWindow(QMainWindow):
                 ax, ay, az
             )
 
-            if not np.isfinite(dist_i):
-                continue
-
-            if dist_i > dist_thresh:
+            if not np.isfinite(dist_i) or dist_i > dist_thresh:
                 continue
 
             curve_tangent_i = np.zeros(3)
