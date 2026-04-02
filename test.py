@@ -1066,12 +1066,14 @@ class MainWindow(QMainWindow):
                             ay = np.linalg.lstsq(A, pts[:, 1], rcond=None)[0]
                             az = np.linalg.lstsq(A, pts[:, 2], rcond=None)[0]
 
-                            # 重新估计结构厚度
+                            # 重新估计结构厚度（使用MAD）
                             vecs = pts - centroid_fit
                             proj = vecs @ direction_fit
                             perp = vecs - np.outer(proj, direction_fit)
                             d_perp = np.linalg.norm(perp, axis=1)
-                            structure_thickness = np.percentile(d_perp, 75)
+                            median_dist = np.median(d_perp)
+                            mad = np.median(np.abs(d_perp - median_dist))
+                            structure_thickness = median_dist + 1.5 * mad
                             dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
 
                             refit_count += 1
