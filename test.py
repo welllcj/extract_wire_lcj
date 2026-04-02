@@ -780,10 +780,11 @@ class MainWindow(QMainWindow):
 
         rep_t_values = []
         rep_dists = []
+        rep_tangents = []  # 缓存切向量，避免重复计算
         all_rep_pass = True
 
         # =========================
-        # 1) 先检查所有代表点
+        # 1) 先检查所有代表点（优化：缓存切向量）
         # =========================
         for ridx in rep_local_idx:
             rp = local_pts[ridx]
@@ -801,7 +802,7 @@ class MainWindow(QMainWindow):
                 all_rep_pass = False
                 break
 
-            # 计算 t_r 处曲线切向
+            # 计算 t_r 处曲线切向（缓存以便后续使用）
             curve_tangent_r = np.zeros(3)
             for i in range(1, order + 1):
                 curve_tangent_r[0] += i * ax[i] * (t_r ** (i - 1))
@@ -821,6 +822,7 @@ class MainWindow(QMainWindow):
                 break
 
             rep_t_values.append(t_r)
+            rep_tangents.append(curve_tangent_r)
 
         # =========================
         # 1.5) 中空导管检测：如果代表点距离较一致且较大，可能是中空导管
@@ -850,17 +852,37 @@ class MainWindow(QMainWindow):
 
         # =========================
         # 3) 如果代表点没有全部通过，则逐点检查所有邻居点
+        #    优化：使用平均切向量减少计算
         # =========================
         t_values = []
 
         # 如果检测到可能是中空导管，放宽距离阈值
         effective_dist_thresh = dist_thresh * 1.3 if is_hollow_pipe else dist_thresh
 
+        # 如果有缓存的切向量，计算平均切向作为参考
+        avg_tangent = None
+        if len(rep_tangents) > 0:
+            avg_tangent = np.mean(rep_tangents, axis=0)
+            avg_tangent_norm = np.linalg.norm(avg_tangent)
+            if avg_tangent_norm > 1e-9:
+                avg_tangent = avg_tangent / avg_tangent_norm
+
         for nid in local_neighbors:
             if nid in visited:
                 continue
 
             np_point = self.current_points[nid]
+
+            # 快速预检：如果有平均切向，先用简单的距离检查
+            if avg_tangent is not None:
+                vec_to_point = np_point - centroid_fit
+                proj_on_tangent = vec_to_point @ avg_tangent
+                perp_vec = vec_to_point - proj_on_tangent * avg_tangent
+                approx_dist = np.linalg.norm(perp_vec)
+
+                # 如果近似距离远超阈值，跳过牛顿迭代
+                if approx_dist > effective_dist_thresh * 1.5:
+                    continue
 
             dist_i, q_i, t_i = point_to_curve_distance_newton(
                 np_point,
