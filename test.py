@@ -280,10 +280,10 @@ class MainWindow(QMainWindow):
 
     ### 估计导线半径
     def estimate_structure_radius(self):
-        """
-        估计导线半径（统一使用：5m球查询 + 截面最近点 + 圆拟合）
+        “””
+        估计导线半径（优化版：更高效的半径枚举 + 中空导管支持）
         返回: radius
-        """
+        “””
 
         seed_ids = list(self.seed_id)
         radius_list = []
@@ -291,19 +291,21 @@ class MainWindow(QMainWindow):
         for pid in seed_ids:
             p = self.current_points[pid]
 
-            # 1) 扫描球半径：用线性度选择主方向，并找出“候选导线半径”
-            #    线性度定义： (eig0 - eig1) / eig0
+            # 1) 优化的半径扫描：先粗扫描找范围，再细扫描
             direction = None
             linearity_best = -np.inf
             best_rr = None
             selected_rr = None
 
-            # 线性度阈值：你的大胆想法
-            linearity_threshold = 0.85
+            # 线性度阈值
+            linearity_threshold = 0.82  # 稍微降低以适应更多场景
 
-            # 从 0.05 开始枚举，步长 0.05
-            r_list = np.arange(0.05, 5.0 + 1e-9, 0.05)
-            for rr in r_list:
+            # 第一阶段：粗扫描（步长0.1）
+            coarse_r_list = np.arange(0.1, 3.0, 0.1)
+            coarse_best_rr = None
+            coarse_best_linearity = -np.inf
+
+            for rr in coarse_r_list:
                 sphere_idxs = self.kdtree.query_ball_point(p, r=rr)
                 sphere_idxs = [i for i in sphere_idxs if self.valid_mask[i]]
 
@@ -325,54 +327,78 @@ class MainWindow(QMainWindow):
                 denom = max(eigvals[0], 1e-12)
                 linearity = (eigvals[0] - eigvals[1]) / denom
 
-                print(
-                    f"[radius] seed={pid} rr={rr:.2f} sphere_n={len(sphere_idxs)} linearity={linearity:.6f} "
-                    f"current_best={linearity_best:.6f}"
-                )
+                if linearity > coarse_best_linearity:
+                    coarse_best_linearity = linearity
+                    coarse_best_rr = rr
+                    direction = eigvecs[:, 0]
 
+                # 如果线性度足够高，提前停止
                 if linearity > linearity_threshold:
                     selected_rr = float(rr)
                     linearity_best = linearity
-                    direction = eigvecs[:, 0]
                     best_rr = rr
-                    print(
-                        f"[radius] seed={pid} 命中阈值: rr={rr:.2f}, "
-                        f"linearity={linearity:.6f} (> {linearity_threshold})，将 rr 视为导线半径并停止扫描"
-                    )
+                    print(f”[radius] seed={pid} 粗扫描命中: rr={rr:.2f}, linearity={linearity:.6f}”)
                     break
 
-                if linearity > linearity_best:
-                    print(
-                        f"[radius] seed={pid} 更新方向: rr={rr:.2f}, "
-                        f"sphere_n={len(sphere_idxs)}, linearity={linearity:.6f}, "
-                        f"prev_linear={linearity_best:.6f}"
-                    )
-                    linearity_best = linearity
-                    direction = eigvecs[:, 0]
-                    best_rr = rr
+            # 第二阶段：如果没有命中阈值，在最佳范围附近细扫描
+            if selected_rr is None and coarse_best_rr is not None:
+                fine_start = max(0.05, coarse_best_rr - 0.15)
+                fine_end = min(3.0, coarse_best_rr + 0.15)
+                fine_r_list = np.arange(fine_start, fine_end, 0.02)
 
-            # 若KNN和扫描都失败，则跳过该种子点
+                for rr in fine_r_list:
+                    sphere_idxs = self.kdtree.query_ball_point(p, r=rr)
+                    sphere_idxs = [i for i in sphere_idxs if self.valid_mask[i]]
+
+                    if len(sphere_idxs) < 10:
+                        continue
+
+                    pts = self.current_points[sphere_idxs]
+                    center = pts.mean(axis=0)
+                    cov = np.cov((pts - center).T)
+                    eigvals, eigvecs = np.linalg.eigh(cov)
+
+                    order = np.argsort(eigvals)[::-1]
+                    eigvals = eigvals[order]
+                    eigvecs = eigvecs[:, order]
+
+                    if eigvals[0] < 1e-12:
+                        continue
+
+                    denom = max(eigvals[0], 1e-12)
+                    linearity = (eigvals[0] - eigvals[1]) / denom
+
+                    if linearity > linearity_threshold:
+                        selected_rr = float(rr)
+                        linearity_best = linearity
+                        direction = eigvecs[:, 0]
+                        best_rr = rr
+                        print(f"[radius] seed={pid} 细扫描命中: rr={rr:.2f}, linearity={linearity:.6f}")
+                        break
+
+                    if linearity > linearity_best:
+                        linearity_best = linearity
+                        direction = eigvecs[:, 0]
+                        best_rr = rr
+
+            # 若扫描失败，则跳过该种子点
             if direction is None:
                 continue
 
-            # 不可视化时，打印方向（从种子点出发便于你核对）
-            p_end = p + direction * 1.0
-            print(
-                f"[radius] seed={pid} direction={direction} p_end={p_end} "
-                f"linearity_best={linearity_best:.6f} best_rr={best_rr}"
-            )
+            print(f"[radius] seed={pid} 最佳线性度={linearity_best:.6f} best_rr={best_rr:.2f}")
 
-            # 你的大胆想法：一旦命中线性度阈值，用该半径直接作为导线半径
+            # 如果命中线性度阈值，直接返回该半径
             if selected_rr is not None:
                 radius_list.append(selected_rr)
-                print(f"[radius] seed={pid} 直接返回半径: {selected_rr:.6f}")
+                print(f"[radius] seed={pid} 直接返回半径: {selected_rr:.4f}")
                 continue
 
-            # 2) 5m球查询获取很多邻居点
-            sphere_idxs = self.kdtree.query_ball_point(p, r=5.0)
+            # 2) 使用较大球查询获取邻居点（优化：使用best_rr的3倍而非固定5m）
+            search_radius = min(5.0, max(1.0, best_rr * 3.0))
+            sphere_idxs = self.kdtree.query_ball_point(p, r=search_radius)
             sphere_idxs = [i for i in sphere_idxs if self.valid_mask[i]]
 
-            if len(sphere_idxs) < 50:
+            if len(sphere_idxs) < 30:  # 降低要求
                 continue
 
             sphere_pts = self.current_points[sphere_idxs]
@@ -404,20 +430,19 @@ class MainWindow(QMainWindow):
                 continue
             e2 = e2 / e2_norm
 
-            # 5) n_fit从10到80（步长5）全部尝试，得到多个半径候选
+            # 5) 优化n_fit扫描范围：基于点数动态调整
             candidate_radius = []
-            n_fit_list = list(range(10, 81, 5))
-            print(f"[radius] seed={pid} 开始扫描 n_fit: {n_fit_list}")
+            max_n_fit = min(80, len(order_idx) // 2)  # 不超过可用点数的一半
+            n_fit_list = list(range(10, max_n_fit + 1, 5))
+            print(f"[radius] seed={pid} 开始扫描 n_fit: {n_fit_list[:5]}...{n_fit_list[-3:] if len(n_fit_list) > 5 else ''}")
 
             for n_fit in n_fit_list:
                 if len(order_idx) < n_fit:
-                    print(f"[radius] seed={pid}, n_fit={n_fit}, 可用点不足，跳过")
                     continue
 
                 fit_idx = order_idx[:n_fit]
                 slice_pts = sphere_pts[fit_idx]
                 if len(slice_pts) < 10:
-                    print(f"[radius] seed={pid}, n_fit={n_fit}, slice点不足10，跳过")
                     continue
 
                 slice_vecs = slice_pts - p
@@ -427,10 +452,9 @@ class MainWindow(QMainWindow):
                 n2 = len(pts2d)
 
                 if n2 < 10:
-                    print(f"[radius] seed={pid}, n_fit={n_fit}, 投影点不足10，跳过")
                     continue
 
-                # ---- DBSCAN（纯numpy实现）----
+                # ---- DBSCAN（纯numpy实现，优化参数）----
                 nearest_dists = np.empty(n2, dtype=float)
                 for i in range(n2):
                     diff = pts2d - pts2d[i]
@@ -438,13 +462,13 @@ class MainWindow(QMainWindow):
                     d2[i] = np.inf
                     nearest_dists[i] = np.sqrt(np.min(d2))
 
-                eps = float(np.percentile(nearest_dists, 20) * 2.5)
-                eps = max(0.05, eps)
-                eps = min(eps, max(0.2, 2.0 * self.radus))
+                eps = float(np.percentile(nearest_dists, 25) * 2.0)  # 调整参数
+                eps = max(0.03, eps)  # 降低最小值
+                eps = min(eps, max(0.25, 2.5 * self.radus))  # 增加上限
                 eps2 = eps * eps
 
-                min_samples = max(6, int(0.12 * n2))
-                min_samples = min(min_samples, 12)
+                min_samples = max(5, int(0.10 * n2))  # 降低最小样本数
+                min_samples = min(min_samples, 15)  # 增加上限
 
                 labels = -np.ones(n2, dtype=int)
                 visited = np.zeros(n2, dtype=bool)
@@ -496,14 +520,13 @@ class MainWindow(QMainWindow):
                         best_count = cnt
                         best_label = cid
 
-                if best_label < 0 or best_count < 10:
+                if best_label < 0 or best_count < 8:  # 降低要求
                     pts_cluster = pts2d
                 else:
                     pts_cluster = pts2d[labels == best_label]
 
                 m = len(pts_cluster)
                 if m < 3:
-                    print(f"[radius] seed={pid}, n_fit={n_fit}, 聚类后点过少，跳过")
                     continue
 
                 best_area = np.inf
@@ -529,44 +552,37 @@ class MainWindow(QMainWindow):
                             best_diag = diag
 
                 if not np.isfinite(best_diag):
-                    print(f"[radius] seed={pid}, n_fit={n_fit}, best_diag无效，跳过")
                     continue
 
                 r_est = 0.5 * best_diag
                 if r_est <= 0 or not np.isfinite(r_est):
-                    print(f"[radius] seed={pid}, n_fit={n_fit}, r_est无效，跳过")
                     continue
 
                 candidate_radius.append((n_fit, r_est))
-                print(
-                    f"[radius] seed={pid}, n_fit={n_fit}, "
-                    f"eps={eps:.4f}, cluster_size={m}, r_est={r_est:.6f}"
-                )
+                # 只在关键点打印，减少日志
+                if n_fit % 20 == 10 or len(candidate_radius) <= 3:
+                    print(f"[radius] seed={pid}, n_fit={n_fit}, r_est={r_est:.4f}")
 
             if len(candidate_radius) == 0:
                 print(f"[radius] seed={pid} 没有可用候选半径，跳过")
                 continue
 
-            # 6) 在所有n_fit候选中，选“最合适”的半径：
+            # 6) 在所有n_fit候选中，选”最合适”的半径：
             #    采用稳健准则：离候选半径中位数最近
             cand_vals = np.array([x[1] for x in candidate_radius], dtype=float)
             cand_med = float(np.median(cand_vals))
             best_idx = int(np.argmin(np.abs(cand_vals - cand_med)))
             best_n_fit, best_r = candidate_radius[best_idx]
 
-            print(
-                f"[radius] seed={pid} 选择结果: n_fit={best_n_fit}, "
-                f"r={best_r:.6f}, cand_median={cand_med:.6f}, "
-                f"candidate_num={len(candidate_radius)}, linearity_best={linearity_best:.6f}"
-            )
+            print(f”[radius] seed={pid} 最终: n_fit={best_n_fit}, r={best_r:.4f}, 候选数={len(candidate_radius)}”)
             radius_list.append(best_r)
 
         if len(radius_list) == 0:
             return self.radus
 
         radius = np.median(radius_list)
+        print(f”[radius] 所有种子点估计完成，最终半径: {radius:.4f}”)
 
-        
         return radius
 
 
@@ -808,11 +824,12 @@ class MainWindow(QMainWindow):
         # 参数设置
         # =========================
 
-        linearity_thresh = 0.65                   # 局部线性度阈值
-        direction_cos_thresh = 0.80               # 方向一致性阈值
-        refit_batch_size = 40                     # 每新增多少点重拟合一次
-        frontier_k = 6                            # 每端选几个前沿点
-        max_iterations = 10000                    # 最大迭代次数，防止无限循环
+        linearity_thresh = 0.60                   # 局部线性度阈值（降低以适应更多场景）
+        direction_cos_thresh = 0.75               # 方向一致性阈值（降低以适应弯曲）
+        refit_batch_size = 50                     # 每新增多少点重拟合一次（增加以减少重拟合次数）
+        frontier_k = 8                            # 每端选几个前沿点（增加以提高覆盖）
+        max_iterations = 15000                    # 最大迭代次数，防止无限循环
+        gap_tolerance = 2.5                       # 断裂容忍倍数（相对于半径）
 
         # =========================
         # 1. 取出种子点
@@ -883,11 +900,11 @@ class MainWindow(QMainWindow):
             # 使用中位数绝对偏差(MAD)提高鲁棒性
             median_dist = np.median(seed_radial_dists)
             mad = np.median(np.abs(seed_radial_dists - median_dist))
-            structure_thickness = median_dist + 1.5 * mad
-            dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
+            structure_thickness = median_dist + 2.0 * mad  # 增加容忍度
+            dist_thresh = max(structure_thickness * 1.5, self.radus * 0.4)  # 更宽松的阈值
             print(f"初始距离阈值: {dist_thresh:.4f} (结构厚度: {structure_thickness:.4f})")
         else:
-            dist_thresh = self.radus / 2
+            dist_thresh = self.radus * 0.6  # 更宽松的默认值
             print(f"初始距离阈值: {dist_thresh:.4f} (默认值)")
 
         # =========================
@@ -905,6 +922,10 @@ class MainWindow(QMainWindow):
         total_accepted = 0
         iteration_count = 0
 
+        # 断裂桥接机制：记录最近N次失败的前沿点
+        failed_frontier_history = deque(maxlen=20)
+        consecutive_failures = 0
+
         # =========================
         # 4. 区域生长
         # =========================
@@ -921,14 +942,29 @@ class MainWindow(QMainWindow):
             local_neighbors = self.kdtree.query_ball_point(p, r=self.radus)
             local_neighbors = [i for i in local_neighbors if self.valid_mask[i]]
 
+            # 如果邻域点数过少，尝试扩大搜索半径（断裂容忍）
             if len(local_neighbors) < 5:
-                continue
+                extended_neighbors = self.kdtree.query_ball_point(p, r=self.radus * gap_tolerance)
+                extended_neighbors = [i for i in extended_neighbors if self.valid_mask[i]]
+                if len(extended_neighbors) >= 5:
+                    local_neighbors = extended_neighbors
+                    consecutive_failures = 0  # 找到点，重置失败计数
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures < 5:  # 允许少量连续失败
+                        continue
+                    else:
+                        failed_frontier_history.append(pid)
+                        continue
+            else:
+                consecutive_failures = 0  # 重置失败计数
 
             local_pts = self.current_points[local_neighbors]
             local_center = local_pts.mean(axis=0)
 
-            # 快速检查：如果邻域点数过少，跳过PCA计算
-            if len(local_pts) < 10:
+            # 快速检查：如果邻域点数过少，降低要求
+            min_pts_for_pca = 8 if len(local_neighbors) >= 10 else 5
+            if len(local_pts) < min_pts_for_pca:
                 continue
 
             local_cov = np.cov((local_pts - local_center).T)
@@ -943,7 +979,12 @@ class MainWindow(QMainWindow):
 
             linearity = (local_eigvals[0] - local_eigvals[1]) / local_eigvals[0]
 
-            if linearity < linearity_thresh:
+            # 动态调整线性度阈值：如果连续失败多次，降低要求
+            effective_linearity_thresh = linearity_thresh
+            if consecutive_failures > 0:
+                effective_linearity_thresh = max(0.50, linearity_thresh - 0.05 * consecutive_failures)
+
+            if linearity < effective_linearity_thresh:
                 continue
 
             local_dir = local_eigvecs[:, 0]
@@ -959,7 +1000,12 @@ class MainWindow(QMainWindow):
                 ax, ay, az
             )
 
-            if not np.isfinite(dist_to_curve) or dist_to_curve > dist_thresh:
+            # 动态调整距离阈值：如果连续失败，放宽距离要求
+            effective_dist_thresh = dist_thresh
+            if consecutive_failures > 0:
+                effective_dist_thresh = dist_thresh * (1.0 + 0.2 * min(consecutive_failures, 3))
+
+            if not np.isfinite(dist_to_curve) or dist_to_curve > effective_dist_thresh:
                 continue
 
               # ==========================================
@@ -981,7 +1027,13 @@ class MainWindow(QMainWindow):
             # 局部方向和曲线切向保持一致，避免走分支
             # ==========================================
             cos_theta = abs(np.dot(local_dir, curve_tangent))
-            if cos_theta < direction_cos_thresh:
+
+            # 动态调整方向阈值
+            effective_direction_thresh = direction_cos_thresh
+            if consecutive_failures > 0:
+                effective_direction_thresh = max(0.65, direction_cos_thresh - 0.05 * min(consecutive_failures, 2))
+
+            if cos_theta < effective_direction_thresh:
                 continue
 
 
@@ -993,22 +1045,44 @@ class MainWindow(QMainWindow):
             if len(candidate_ids) == 0:
                 continue
 
-            # 选择代表点：优先选择距离中心较远且分布均匀的点
+            # 选择代表点：优先选择距离中心较远且角度分布均匀的点
             candidate_pts = self.current_points[candidate_ids]
             dists_to_center = np.linalg.norm(candidate_pts - p, axis=1)
 
             # 动态调整代表点数量：邻域越大，代表点越多
-            num_representatives = min(max(3, len(candidate_ids) // 10), 8)
+            num_representatives = min(max(4, len(candidate_ids) // 8), 10)  # 增加代表点数量
 
-            # 选择距离最远的点作为代表点
+            # 改进代表点选择：结合距离和角度分布
             if len(candidate_ids) <= num_representatives:
                 rep_indices = np.arange(len(candidate_ids))
             else:
-                rep_indices = np.argsort(dists_to_center)[-num_representatives:]
+                # 先选择距离最远的2倍候选
+                far_candidates = np.argsort(dists_to_center)[-(num_representatives * 2):]
+
+                # 在远点中选择角度分布均匀的点
+                if len(far_candidates) > num_representatives:
+                    far_pts = candidate_pts[far_candidates]
+                    vecs = far_pts - p
+                    # 投影到垂直于局部方向的平面
+                    perp_vecs = vecs - np.outer(vecs @ local_dir, local_dir)
+                    norms = np.linalg.norm(perp_vecs, axis=1)
+
+                    # 计算角度（避免除零）
+                    angles = np.zeros(len(far_candidates))
+                    for i, (vec, norm) in enumerate(zip(perp_vecs, norms)):
+                        if norm > 1e-9:
+                            angles[i] = np.arctan2(vec[1], vec[0])
+
+                    # 按角度排序，均匀采样
+                    sorted_by_angle = np.argsort(angles)
+                    step = max(1, len(sorted_by_angle) // num_representatives)
+                    rep_indices = far_candidates[sorted_by_angle[::step][:num_representatives]]
+                else:
+                    rep_indices = far_candidates
 
             rep_local_idx = rep_indices
 
-            # 调用代表点检查函数
+            # 调用代表点检查函数（使用动态阈值）
             accepted_ids, t_values, all_rep_pass = self.process_representative_points_and_neighbors(
                 rep_local_idx,
                 candidate_pts,
@@ -1019,8 +1093,8 @@ class MainWindow(QMainWindow):
                 centroid_fit,
                 ax, ay, az,
                 order,
-                dist_thresh,
-                direction_cos_thresh
+                effective_dist_thresh,  # 使用动态阈值
+                effective_direction_thresh  # 使用动态阈值
             )
 
             if len(accepted_ids) == 0:
@@ -1115,10 +1189,11 @@ class MainWindow(QMainWindow):
                             d_perp = np.linalg.norm(perp, axis=1)
                             median_dist = np.median(d_perp)
                             mad = np.median(np.abs(d_perp - median_dist))
-                            structure_thickness = median_dist + 1.5 * mad
-                            dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
+                            structure_thickness = median_dist + 2.0 * mad  # 增加容忍度
+                            dist_thresh = max(structure_thickness * 1.5, self.radus * 0.4)  # 更宽松
 
                             refit_count += 1
+                            consecutive_failures = 0  # 重拟合后重置失败计数
                             print(f"完成第 {refit_count} 次重拟合，当前点数: {len(visited)}, 距离阈值: {dist_thresh:.4f}")
 
                 new_added_since_refit = 0
