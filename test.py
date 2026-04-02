@@ -711,7 +711,7 @@ class MainWindow(QMainWindow):
                 ax, ay, az
             )
 
-            if not np.isfinite(dist_r):
+            if not np.isfinite(dist_r) or dist_r > dist_thresh:
                 all_rep_pass = False
                 break
 
@@ -730,7 +730,7 @@ class MainWindow(QMainWindow):
             curve_tangent_r = curve_tangent_r / tangent_norm_r
             cos_r = abs(np.dot(local_dir, curve_tangent_r))
 
-            if dist_r > dist_thresh or cos_r < direction_cos_thresh:
+            if cos_r < direction_cos_thresh:
                 all_rep_pass = False
                 break
 
