@@ -1224,7 +1224,7 @@ class MainWindow(QMainWindow):
             new_added_since_refit += len(accepted_ids)
 
             # ==========================================
-            # 4.7 优化前沿点选择：基于曲线切向，增加优先级队列机制
+            # 4.7 智能前沿点选择：基于曲线切向和方向预测
             # ==========================================
             accepted_ids_arr = np.array(accepted_ids)
             accepted_pts = self.current_points[accepted_ids_arr]
@@ -1241,16 +1241,52 @@ class MainWindow(QMainWindow):
                 sort_idx = np.argsort(proj)
                 k = min(frontier_k, len(sort_idx))
 
-                # 优先选择投影距离较大的点（远离中心）
-                for idx in sort_idx[:k]:
-                    frontier.add(int(accepted_ids_arr[idx]))
+                # 方向预测：预测曲线延伸方向，优先选择该方向的点
+                # 计算当前点在曲线上的二阶导数（曲率方向）
+                if order >= 2:
+                    curve_accel = np.zeros(3)
+                    for i in range(2, order + 1):
+                        curve_accel[0] += i * (i - 1) * ax[i] * (t_p ** (i - 2))
+                        curve_accel[1] += i * (i - 1) * ay[i] * (t_p ** (i - 2))
+                        curve_accel[2] += i * (i - 1) * az[i] * (t_p ** (i - 2))
 
-                for idx in sort_idx[-k:]:
-                    frontier.add(int(accepted_ids_arr[idx]))
+                    accel_norm = np.linalg.norm(curve_accel)
+                    if accel_norm > 1e-9:
+                        # 曲线弯曲方向
+                        curve_accel = curve_accel / accel_norm
+
+                        # 计算每个接收点与曲率方向的一致性
+                        accel_scores = vecs @ curve_accel
+
+                        # 结合投影距离和曲率一致性选择前沿点
+                        # 正向：选择投影大且与曲率一致的点
+                        forward_scores = proj + 0.3 * accel_scores
+                        # 反向：选择投影小且与曲率反向的点
+                        backward_scores = -proj - 0.3 * accel_scores
+
+                        forward_best = np.argsort(forward_scores)[-k:]
+                        backward_best = np.argsort(backward_scores)[-k:]
+
+                        for idx in forward_best:
+                            frontier.add(int(accepted_ids_arr[idx]))
+                        for idx in backward_best:
+                            frontier.add(int(accepted_ids_arr[idx]))
+                    else:
+                        # 退化为简单的投影距离选择
+                        for idx in sort_idx[:k]:
+                            frontier.add(int(accepted_ids_arr[idx]))
+                        for idx in sort_idx[-k:]:
+                            frontier.add(int(accepted_ids_arr[idx]))
+                else:
+                    # 低阶拟合，使用简单策略
+                    for idx in sort_idx[:k]:
+                        frontier.add(int(accepted_ids_arr[idx]))
+                    for idx in sort_idx[-k:]:
+                        frontier.add(int(accepted_ids_arr[idx]))
 
                 # 额外添加：如果接收点数较多，增加中间区域的采样
                 if len(accepted_ids_arr) > 20:
-                    mid_k = min(3, len(sort_idx) // 4)  # 增加中间采样
+                    mid_k = min(3, len(sort_idx) // 4)
                     mid_start = len(sort_idx) // 2 - mid_k // 2
                     for i in range(mid_start, mid_start + mid_k):
                         if 0 <= i < len(sort_idx):
