@@ -808,10 +808,11 @@ class MainWindow(QMainWindow):
         # 参数设置
         # =========================
 
-        linearity_thresh = 0.65                   # 局部线性度阈值（降低以适应更多场景）
-        direction_cos_thresh = 0.80               # 方向一致性阈值（略微放宽）
-        refit_batch_size = 40                     # 每新增多少点重拟合一次（更频繁）
-        frontier_k = 6                            # 每端选几个前沿点（增加覆盖）
+        linearity_thresh = 0.65                   # 局部线性度阈值
+        direction_cos_thresh = 0.80               # 方向一致性阈值
+        refit_batch_size = 40                     # 每新增多少点重拟合一次
+        frontier_k = 6                            # 每端选几个前沿点
+        max_iterations = 10000                    # 最大迭代次数，防止无限循环
 
         # =========================
         # 1. 取出种子点
@@ -902,14 +903,13 @@ class MainWindow(QMainWindow):
         # 记录生长统计信息
         total_checked = 0
         total_accepted = 0
+        iteration_count = 0
 
         # =========================
         # 4. 区域生长
         # =========================
-        while queue:
-            # if time.perf_counter() - start_time > 10:
-            #     print("曲线提取超时 10 秒，提前结束")
-            #     break
+        while queue and iteration_count < max_iterations:
+            iteration_count += 1
 
             pid = queue.popleft()
             p = self.current_points[pid]
@@ -1122,7 +1122,10 @@ class MainWindow(QMainWindow):
         # 输出最终统计信息
         if total_checked > 0:
             acceptance_rate = total_accepted / total_checked * 100
-            print(f"提取完成：共检查 {total_checked} 个候选点，接收 {total_accepted} 个 ({acceptance_rate:.1f}%)")
+            print(f"提取完成：迭代 {iteration_count} 次，检查 {total_checked} 个候选点，接收 {total_accepted} 个 ({acceptance_rate:.1f}%)")
+
+        if iteration_count >= max_iterations:
+            print(f"警告：达到最大迭代次数 {max_iterations}，提前终止")
 
         return wire_ids
     
