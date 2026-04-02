@@ -630,24 +630,62 @@ class MainWindow(QMainWindow):
                     print(f"[radius] seed={pid}, n_fit={n_fit}, r_est={r_est:.4f}")
 
             if len(candidate_radius) == 0:
-                print(f"[radius] seed={pid} 没有可用候选半径，跳过")
+                print(f”[radius] seed={pid} 没有可用候选半径，跳过”)
                 continue
 
-            # 6) 在所有n_fit候选中，选”最合适”的半径：
-            #    采用稳健准则：离候选半径中位数最近
+            # 6) 改进的半径选择策略：
+            #    结合中位数和稳定性，移除异常值
             cand_vals = np.array([x[1] for x in candidate_radius], dtype=float)
-            cand_med = float(np.median(cand_vals))
-            best_idx = int(np.argmin(np.abs(cand_vals - cand_med)))
-            best_n_fit, best_r = candidate_radius[best_idx]
 
-            print(f”[radius] seed={pid} 最终: n_fit={best_n_fit}, r={best_r:.4f}, 候选数={len(candidate_radius)}”)
+            # 移除明显的异常值（使用IQR方法）
+            if len(cand_vals) >= 5:
+                q25 = np.percentile(cand_vals, 25)
+                q75 = np.percentile(cand_vals, 75)
+                iqr = q75 - q25
+                lower_bound = q25 - 1.5 * iqr
+                upper_bound = q75 + 1.5 * iqr
+                valid_mask = (cand_vals >= lower_bound) & (cand_vals <= upper_bound)
+
+                if np.sum(valid_mask) >= 3:
+                    cand_vals = cand_vals[valid_mask]
+                    candidate_radius = [cr for cr, valid in zip(candidate_radius, valid_mask) if valid]
+
+            # 选择中位数附近最稳定的半径
+            cand_med = float(np.median(cand_vals))
+            cand_std = float(np.std(cand_vals))
+
+            # 如果标准差很小，说明估计稳定，直接用中位数
+            if cand_std < cand_med * 0.15:
+                best_r = cand_med
+                best_n_fit = candidate_radius[len(candidate_radius) // 2][0]
+            else:
+                # 否则选择离中位数最近的
+                best_idx = int(np.argmin(np.abs(cand_vals - cand_med)))
+                best_n_fit, best_r = candidate_radius[best_idx]
+
+            print(f”[radius] seed={pid} 最终: n_fit={best_n_fit}, r={best_r:.4f}, 候选数={len(candidate_radius)}, std={cand_std:.4f}”)
             radius_list.append(best_r)
 
         if len(radius_list) == 0:
             return self.radus
 
-        radius = np.median(radius_list)
-        print(f”[radius] 所有种子点估计完成，最终半径: {radius:.4f}”)
+        # 多个种子点的半径融合：使用加权中位数（权重为1/std）
+        if len(radius_list) == 1:
+            radius = radius_list[0]
+        else:
+            # 移除极端值
+            radius_arr = np.array(radius_list)
+            radius_med = np.median(radius_arr)
+            radius_mad = np.median(np.abs(radius_arr - radius_med))
+
+            if radius_mad > 1e-6:
+                valid_radius_mask = np.abs(radius_arr - radius_med) <= 3.0 * radius_mad
+                if np.sum(valid_radius_mask) >= len(radius_list) * 0.5:
+                    radius_arr = radius_arr[valid_radius_mask]
+
+            radius = float(np.median(radius_arr))
+
+        print(f”[radius] 所有种子点估计完成，最终半径: {radius:.4f} (基于{len(radius_list)}个种子点)”)
 
         return radius
 
