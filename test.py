@@ -300,16 +300,20 @@ class MainWindow(QMainWindow):
             # 线性度阈值
             linearity_threshold = 0.82  # 稍微降低以适应更多场景
 
-            # 第一阶段：粗扫描（步长0.1）
+            # 第一阶段：粗扫描（步长0.1），增加快速失败机制
             coarse_r_list = np.arange(0.1, 3.0, 0.1)
             coarse_best_rr = None
             coarse_best_linearity = -np.inf
+            no_improvement_count = 0  # 连续无改进计数
 
             for rr in coarse_r_list:
                 sphere_idxs = self.kdtree.query_ball_point(p, r=rr)
                 sphere_idxs = [i for i in sphere_idxs if self.valid_mask[i]]
 
                 if len(sphere_idxs) < 10:
+                    no_improvement_count += 1
+                    if no_improvement_count > 5:  # 连续5次无效，可能点云稀疏
+                        break
                     continue
 
                 pts = self.current_points[sphere_idxs]
@@ -331,6 +335,12 @@ class MainWindow(QMainWindow):
                     coarse_best_linearity = linearity
                     coarse_best_rr = rr
                     direction = eigvecs[:, 0]
+                    no_improvement_count = 0  # 重置计数
+                else:
+                    no_improvement_count += 1
+                    # 如果连续多次无改进且已有较好结果，提前停止
+                    if no_improvement_count > 8 and coarse_best_linearity > 0.7:
+                        break
 
                 # 如果线性度足够高，提前停止
                 if linearity > linearity_threshold:
@@ -996,6 +1006,10 @@ class MainWindow(QMainWindow):
         failed_frontier_history = deque(maxlen=20)
         consecutive_failures = 0
 
+        # 自适应搜索半径：根据局部点密度动态调整
+        adaptive_search_radius = self.radus
+        radius_adjustment_count = 0
+
         # =========================
         # 4. 区域生长
         # =========================
@@ -1007,18 +1021,23 @@ class MainWindow(QMainWindow):
 
 
             # ==========================================
-            # 4.2 判断当前中心点局部区域是不是像一条线
+            # 4.2 自适应邻域搜索
             # ==========================================
-            local_neighbors = self.kdtree.query_ball_point(p, r=self.radus)
+            # 先用自适应半径搜索
+            local_neighbors = self.kdtree.query_ball_point(p, r=adaptive_search_radius)
             local_neighbors = [i for i in local_neighbors if self.valid_mask[i]]
 
             # 如果邻域点数过少，尝试扩大搜索半径（断裂容忍）
             if len(local_neighbors) < 5:
-                extended_neighbors = self.kdtree.query_ball_point(p, r=self.radus * gap_tolerance)
+                extended_neighbors = self.kdtree.query_ball_point(p, r=adaptive_search_radius * gap_tolerance)
                 extended_neighbors = [i for i in extended_neighbors if self.valid_mask[i]]
                 if len(extended_neighbors) >= 5:
                     local_neighbors = extended_neighbors
                     consecutive_failures = 0  # 找到点，重置失败计数
+                    # 如果扩大半径后找到点，考虑增加自适应半径
+                    if radius_adjustment_count < 5:
+                        adaptive_search_radius = min(adaptive_search_radius * 1.1, self.radus * 2.0)
+                        radius_adjustment_count += 1
                 else:
                     consecutive_failures += 1
                     if consecutive_failures < 5:  # 允许少量连续失败
@@ -1028,6 +1047,10 @@ class MainWindow(QMainWindow):
                         continue
             else:
                 consecutive_failures = 0  # 重置失败计数
+                # 如果邻域点数充足，考虑恢复正常半径
+                if len(local_neighbors) > 20 and adaptive_search_radius > self.radus * 1.2:
+                    adaptive_search_radius = max(self.radus, adaptive_search_radius * 0.95)
+                    radius_adjustment_count = max(0, radius_adjustment_count - 1)
 
             local_pts = self.current_points[local_neighbors]
             local_center = local_pts.mean(axis=0)
