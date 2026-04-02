@@ -464,7 +464,7 @@ class MainWindow(QMainWindow):
                 if n2 < 10:
                     continue
 
-                # ---- DBSCAN（纯numpy实现，优化参数）----
+                # ---- 自适应DBSCAN（纯numpy实现）----
                 nearest_dists = np.empty(n2, dtype=float)
                 for i in range(n2):
                     diff = pts2d - pts2d[i]
@@ -472,13 +472,32 @@ class MainWindow(QMainWindow):
                     d2[i] = np.inf
                     nearest_dists[i] = np.sqrt(np.min(d2))
 
-                eps = float(np.percentile(nearest_dists, 25) * 2.0)  # 调整参数
-                eps = max(0.03, eps)  # 降低最小值
-                eps = min(eps, max(0.25, 2.5 * self.radus))  # 增加上限
+                # 根据点密度自适应调整eps
+                # 使用四分位数范围(IQR)提高鲁棒性
+                q25 = np.percentile(nearest_dists, 25)
+                q75 = np.percentile(nearest_dists, 75)
+                iqr = q75 - q25
+
+                if iqr > 1e-6:
+                    # 点密度不均匀，使用IQR
+                    eps = float(q25 + 1.5 * iqr)
+                else:
+                    # 点密度均匀，使用中位数
+                    eps = float(np.median(nearest_dists) * 2.0)
+
+                eps = max(0.03, eps)  # 最小值
+                eps = min(eps, max(0.3, 3.0 * self.radus))  # 最大值
                 eps2 = eps * eps
 
-                min_samples = max(5, int(0.10 * n2))  # 降低最小样本数
-                min_samples = min(min_samples, 15)  # 增加上限
+                # 根据点数和密度自适应调整min_samples
+                density_factor = np.median(nearest_dists)
+                if density_factor < 0.05:  # 高密度
+                    min_samples = max(6, int(0.12 * n2))
+                elif density_factor > 0.15:  # 低密度
+                    min_samples = max(4, int(0.08 * n2))
+                else:  # 中等密度
+                    min_samples = max(5, int(0.10 * n2))
+                min_samples = min(min_samples, 15)  # 上限
 
                 labels = -np.ones(n2, dtype=int)
                 visited = np.zeros(n2, dtype=bool)
@@ -540,7 +559,7 @@ class MainWindow(QMainWindow):
                     continue
 
                 # ==========================================
-                # 中空导管检测：检查点是否呈环形分布
+                # 中空导管检测：检查点是否呈环形分布（改进版）
                 # ==========================================
                 is_hollow = False
                 if m >= 8:
@@ -548,14 +567,24 @@ class MainWindow(QMainWindow):
                     center_2d = pts_cluster.mean(axis=0)
                     radial_dists = np.linalg.norm(pts_cluster - center_2d, axis=1)
                     radial_mean = np.mean(radial_dists)
+                    radial_median = np.median(radial_dists)
                     radial_std = np.std(radial_dists)
 
-                    # 如果径向距离标准差小，说明点分布在圆环上
-                    if radial_std < radial_mean * 0.3 and radial_mean > 0.05:
+                    # 改进的环形判定：
+                    # 1. 径向距离标准差小（点在圆环上）
+                    # 2. 平均值和中位数接近（分布对称）
+                    # 3. 最小径向距离不为0（中心无点）
+                    radial_min = np.min(radial_dists)
+                    mean_median_diff = abs(radial_mean - radial_median)
+
+                    if (radial_std < radial_mean * 0.35 and
+                        mean_median_diff < radial_mean * 0.2 and
+                        radial_min > radial_mean * 0.3 and
+                        radial_mean > 0.05):
                         is_hollow = True
 
-                        # 对于中空导管，半径估计为径向距离的平均值
-                        r_est = radial_mean
+                        # 对于中空导管，半径估计为径向距离的中位数（更鲁棒）
+                        r_est = radial_median
                         if r_est > 0 and np.isfinite(r_est):
                             candidate_radius.append((n_fit, r_est))
                             if n_fit % 20 == 10 or len(candidate_radius) <= 3:
