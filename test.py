@@ -900,6 +900,10 @@ class MainWindow(QMainWindow):
         new_added_since_refit = 0
         refit_count = 0
 
+        # 记录生长统计信息
+        total_checked = 0
+        total_accepted = 0
+
         # =========================
         # 4. 区域生长
         # =========================
@@ -1017,6 +1021,10 @@ class MainWindow(QMainWindow):
             if len(accepted_ids) == 0:
                 continue
 
+            # 更新统计信息
+            total_checked += len(candidate_ids)
+            total_accepted += len(accepted_ids)
+
             visited.update(accepted_ids)
             new_added_since_refit += len(accepted_ids)
 
@@ -1111,6 +1119,12 @@ class MainWindow(QMainWindow):
                 new_added_since_refit = 0
 
         wire_ids = list(visited)
+
+        # 输出最终统计信息
+        if total_checked > 0:
+            acceptance_rate = total_accepted / total_checked * 100
+            print(f"提取完成：共检查 {total_checked} 个候选点，接收 {total_accepted} 个 ({acceptance_rate:.1f}%)")
+
         return wire_ids
     
     def extract_wire(self):
