@@ -1160,6 +1160,12 @@ class MainWindow(QMainWindow):
                 current_visited_count = len(visited)
                 growth = current_visited_count - last_visited_count
 
+                # 进度反馈
+                if total_checked > 0:
+                    current_acceptance_rate = total_accepted / total_checked * 100
+                    print(f"进度：迭代 {iteration_count}, 已提取 {current_visited_count} 点, "
+                          f"接受率 {current_acceptance_rate:.1f}%, 队列长度 {len(queue)}")
+
                 if growth < check_interval * 0.05:  # 增长率低于5%
                     stagnation_count += 1
                     if stagnation_count >= 3:  # 连续3次检查都停滞
