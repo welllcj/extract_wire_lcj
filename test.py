@@ -1028,11 +1028,20 @@ class MainWindow(QMainWindow):
                 sort_idx = np.argsort(proj)
                 k = min(frontier_k, len(sort_idx))
 
+                # 优先选择投影距离较大的点（远离中心）
                 for idx in sort_idx[:k]:
                     frontier.add(int(accepted_ids_arr[idx]))
 
                 for idx in sort_idx[-k:]:
                     frontier.add(int(accepted_ids_arr[idx]))
+
+                # 额外添加：如果接收点数较多，增加中间区域的采样
+                if len(accepted_ids_arr) > 20:
+                    mid_k = min(2, len(sort_idx) // 4)
+                    mid_start = len(sort_idx) // 2 - mid_k // 2
+                    for i in range(mid_start, mid_start + mid_k):
+                        if 0 <= i < len(sort_idx):
+                            frontier.add(int(accepted_ids_arr[sort_idx[i]]))
 
             for fid in frontier:
                 if fid not in queued:
