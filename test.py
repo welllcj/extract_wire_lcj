@@ -949,6 +949,29 @@ class MainWindow(QMainWindow):
             print("种子点投影范围过小，无法拟合曲线")
             return list(self.seed_id)
 
+        # 初始拟合前的异常值过滤（基于投影距离）
+        if len(pts) > 3:
+            proj_vecs = pts - centroid_fit
+            proj_dists = np.abs(proj_vecs @ direction_fit)
+            perp_vecs = proj_vecs - np.outer(proj_dists, direction_fit)
+            perp_dists = np.linalg.norm(perp_vecs, axis=1)
+
+            # 移除垂直距离过大的种子点
+            median_perp = np.median(perp_dists)
+            mad_perp = np.median(np.abs(perp_dists - median_perp))
+            perp_thresh = median_perp + 3.0 * mad_perp
+            valid_seed_mask = perp_dists <= perp_thresh
+
+            if np.sum(valid_seed_mask) >= 2:
+                pts = pts[valid_seed_mask]
+                seed_ids = [sid for sid, valid in zip(seed_ids, valid_seed_mask) if valid]
+                if np.sum(~valid_seed_mask) > 0:
+                    print(f"移除 {np.sum(~valid_seed_mask)} 个偏离主轴的种子点")
+
+                # 重新计算质心和投影
+                centroid_fit = pts.mean(axis=0)
+                t = (pts - centroid_fit) @ direction_fit
+
         n = len(pts)
         # 动态调整多项式阶数：点数少用低阶，点数多用高阶
         if n < 5:
@@ -1261,6 +1284,16 @@ class MainWindow(QMainWindow):
 
                 if len(pts) >= 3:
                     centroid_fit = pts.mean(axis=0)
+
+                    # 异常值过滤：移除距离质心过远的点（可能是误提取）
+                    if len(pts) > 20:
+                        dists_to_centroid = np.linalg.norm(pts - centroid_fit, axis=1)
+                        median_dist_c = np.median(dists_to_centroid)
+                        mad_c = np.median(np.abs(dists_to_centroid - median_dist_c))
+                        outlier_thresh = median_dist_c + 4.0 * mad_c
+                        inlier_mask = dists_to_centroid <= outlier_thresh
+                        if np.sum(inlier_mask) >= len(pts) * 0.9:  # 至少保留90%的点
+                            pts = pts[inlier_mask]
 
                     cov = np.cov((pts - centroid_fit).T)
                     eigvals, eigvecs = np.linalg.eigh(cov)
