@@ -1615,6 +1615,47 @@ class MainWindow(QMainWindow):
             else:
                 wire_ids = wire_ids_filtered
 
+        # =========================
+        # 质量评估：评估提取结果的质量
+        # =========================
+        if len(wire_ids) > 0:
+            wire_pts_final = self.current_points[wire_ids]
+
+            # 评估1：线性度（整体）
+            if len(wire_pts_final) >= 3:
+                centroid_final = wire_pts_final.mean(axis=0)
+                cov_final = np.cov((wire_pts_final - centroid_final).T)
+                eigvals_final, _ = np.linalg.eigh(cov_final)
+                eigvals_final = np.sort(eigvals_final)[::-1]
+
+                if eigvals_final[0] > 1e-12:
+                    overall_linearity = (eigvals_final[0] - eigvals_final[1]) / eigvals_final[0]
+                    print(f"质量评估：整体线性度 = {overall_linearity:.3f}")
+
+                    if overall_linearity < 0.5:
+                        print(f"警告：提取结果线性度较低，可能包含误提取点")
+
+            # 评估2：点密度均匀性
+            if len(wire_ids) >= 10:
+                wire_kdtree_final = cKDTree(wire_pts_final)
+                sample_size = min(50, len(wire_ids))
+                sample_indices = np.random.choice(len(wire_ids), sample_size, replace=False)
+
+                densities = []
+                for idx in sample_indices:
+                    neighbors = wire_kdtree_final.query_ball_point(wire_pts_final[idx], r=self.radus)
+                    densities.append(len(neighbors))
+
+                density_std = np.std(densities)
+                density_mean = np.mean(densities)
+
+                if density_mean > 0:
+                    density_cv = density_std / density_mean  # 变异系数
+                    print(f"质量评估：点密度变异系数 = {density_cv:.3f} (平均密度: {density_mean:.1f})")
+
+                    if density_cv > 0.8:
+                        print(f"警告：点密度不均匀，可能存在断裂或误提取")
+
         # 输出最终统计信息
         if total_checked > 0:
             acceptance_rate = total_accepted / total_checked * 100
