@@ -993,13 +993,19 @@ class MainWindow(QMainWindow):
             if len(candidate_ids) == 0:
                 continue
 
-            # 选择代表点：距离中心点较远的点，并考虑方向分布
+            # 选择代表点：优先选择距离中心较远且分布均匀的点
             candidate_pts = self.current_points[candidate_ids]
             dists_to_center = np.linalg.norm(candidate_pts - p, axis=1)
 
-            # 动态调整代表点数量
+            # 动态调整代表点数量：邻域越大，代表点越多
             num_representatives = min(max(3, len(candidate_ids) // 10), 8)
-            rep_indices = np.argsort(dists_to_center)[-num_representatives:]
+
+            # 选择距离最远的点作为代表点
+            if len(candidate_ids) <= num_representatives:
+                rep_indices = np.arange(len(candidate_ids))
+            else:
+                rep_indices = np.argsort(dists_to_center)[-num_representatives:]
+
             rep_local_idx = rep_indices
 
             # 调用代表点检查函数
