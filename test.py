@@ -1132,6 +1132,23 @@ class MainWindow(QMainWindow):
         min_dist_thresh = self.radus * 0.3  # 最小阈值
         max_dist_thresh = self.radus * 2.0  # 最大阈值
 
+        # 稀疏点云检测：估计初始点密度
+        initial_density = 0.0
+        if len(seed_ids) >= 2:
+            seed_pts_sample = self.current_points[seed_ids[:min(5, len(seed_ids))]]
+            for sp in seed_pts_sample:
+                neighbors = self.kdtree.query_ball_point(sp, r=self.radus)
+                initial_density += len(neighbors)
+            initial_density /= len(seed_pts_sample)
+
+        is_sparse_cloud = initial_density < 15  # 如果平均邻居数少于15，判定为稀疏点云
+        if is_sparse_cloud:
+            print(f"检测到稀疏点云（平均密度: {initial_density:.1f}），将放宽约束")
+            # 对稀疏点云放宽参数
+            linearity_thresh = max(0.50, linearity_thresh - 0.1)
+            direction_cos_thresh = max(0.65, direction_cos_thresh - 0.1)
+            gap_tolerance = min(3.5, gap_tolerance + 1.0)
+
         # =========================
         # 4. 区域生长
         # =========================
