@@ -1217,6 +1217,7 @@ class MainWindow(QMainWindow):
 
             # ==========================================
             # 局部方向和曲线切向保持一致，避免走分支
+            # 增加对极端弯曲的检测和处理
             # ==========================================
             cos_theta = abs(np.dot(local_dir, curve_tangent))
 
@@ -1225,7 +1226,24 @@ class MainWindow(QMainWindow):
             if consecutive_failures > 0:
                 effective_direction_thresh = max(0.65, direction_cos_thresh - 0.05 * min(consecutive_failures, 2))
 
-            if cos_theta < effective_direction_thresh:
+            # 检测极端弯曲：如果方向不一致但曲率很大，可能是急转弯
+            is_sharp_turn = False
+            if cos_theta < effective_direction_thresh and order >= 2:
+                # 计算曲率（二阶导数的模）
+                curve_accel = np.zeros(3)
+                for i in range(2, order + 1):
+                    curve_accel[0] += i * (i - 1) * ax[i] * (t_p ** (i - 2))
+                    curve_accel[1] += i * (i - 1) * ay[i] * (t_p ** (i - 2))
+                    curve_accel[2] += i * (i - 1) * az[i] * (t_p ** (i - 2))
+
+                curvature = np.linalg.norm(curve_accel)
+
+                # 如果曲率大且距离小，判定为急转弯，放宽方向要求
+                if curvature > 0.5 and dist_to_curve < dist_thresh * 0.7:
+                    is_sharp_turn = True
+                    effective_direction_thresh = max(0.55, effective_direction_thresh - 0.15)
+
+            if cos_theta < effective_direction_thresh and not is_sharp_turn:
                 continue
 
 
