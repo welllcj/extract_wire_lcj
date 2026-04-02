@@ -529,6 +529,33 @@ class MainWindow(QMainWindow):
                 if m < 3:
                     continue
 
+                # ==========================================
+                # 中空导管检测：检查点是否呈环形分布
+                # ==========================================
+                is_hollow = False
+                if m >= 8:
+                    # 计算点到质心的距离
+                    center_2d = pts_cluster.mean(axis=0)
+                    radial_dists = np.linalg.norm(pts_cluster - center_2d, axis=1)
+                    radial_mean = np.mean(radial_dists)
+                    radial_std = np.std(radial_dists)
+
+                    # 如果径向距离标准差小，说明点分布在圆环上
+                    if radial_std < radial_mean * 0.3 and radial_mean > 0.05:
+                        is_hollow = True
+
+                        # 对于中空导管，半径估计为径向距离的平均值
+                        r_est = radial_mean
+                        if r_est > 0 and np.isfinite(r_est):
+                            candidate_radius.append((n_fit, r_est))
+                            if n_fit % 20 == 10 or len(candidate_radius) <= 3:
+                                print(f"[radius] seed={pid}, n_fit={n_fit}, r_est={r_est:.4f} (中空导管)")
+                        continue
+
+                # ==========================================
+                # 实心导线：使用最小外接矩形
+                # ==========================================
+
                 best_area = np.inf
                 best_diag = np.inf
                 for i in range(m):
@@ -701,10 +728,11 @@ class MainWindow(QMainWindow):
         direction_cos_thresh
     ):
         """
-        处理代表点与邻居点：
+        处理代表点与邻居点（优化版：支持中空导管）
         1. 先检查所有代表点是否都满足条件
         2. 如果全部满足，则当前邻域整体接收
         3. 如果有任意一个不满足，则对所有邻居点逐个检查
+        4. 增加中空导管检测：如果代表点分布呈环形，放宽距离要求
         返回:
             accepted_ids: 最终接收的点编号列表
             t_values: 通过检查时对应的曲线参数t列表
@@ -712,6 +740,7 @@ class MainWindow(QMainWindow):
         """
 
         rep_t_values = []
+        rep_dists = []
         all_rep_pass = True
 
         # =========================
@@ -726,6 +755,8 @@ class MainWindow(QMainWindow):
                 centroid_fit,
                 ax, ay, az
             )
+
+            rep_dists.append(dist_r if np.isfinite(dist_r) else 1e6)
 
             if not np.isfinite(dist_r) or dist_r > dist_thresh:
                 all_rep_pass = False
@@ -752,12 +783,26 @@ class MainWindow(QMainWindow):
 
             rep_t_values.append(t_r)
 
+        # =========================
+        # 1.5) 中空导管检测：如果代表点距离较一致且较大，可能是中空导管
+        # =========================
+        is_hollow_pipe = False
+        if len(rep_dists) >= 3:
+            rep_dists_arr = np.array(rep_dists)
+            valid_dists = rep_dists_arr[rep_dists_arr < 1e5]
+            if len(valid_dists) >= 3:
+                dist_std = np.std(valid_dists)
+                dist_mean = np.mean(valid_dists)
+                # 如果距离标准差小，且平均距离接近阈值，判定为中空导管
+                if dist_std < dist_thresh * 0.3 and dist_mean > dist_thresh * 0.5:
+                    is_hollow_pipe = True
+
         accepted_ids = []
 
         # =========================
-        # 2) 如果所有代表点都通过，则整团接收
+        # 2) 如果所有代表点都通过，或检测到中空导管，则整团接收
         # =========================
-        if all_rep_pass:
+        if all_rep_pass or is_hollow_pipe:
             for nid in local_neighbors:
                 if nid not in visited:
                     accepted_ids.append(nid)
@@ -768,6 +813,9 @@ class MainWindow(QMainWindow):
         # 3) 如果代表点没有全部通过，则逐点检查所有邻居点
         # =========================
         t_values = []
+
+        # 如果检测到可能是中空导管，放宽距离阈值
+        effective_dist_thresh = dist_thresh * 1.3 if is_hollow_pipe else dist_thresh
 
         for nid in local_neighbors:
             if nid in visited:
@@ -782,7 +830,7 @@ class MainWindow(QMainWindow):
                 ax, ay, az
             )
 
-            if not np.isfinite(dist_i) or dist_i > dist_thresh:
+            if not np.isfinite(dist_i) or dist_i > effective_dist_thresh:
                 continue
 
             curve_tangent_i = np.zeros(3)
@@ -1108,7 +1156,7 @@ class MainWindow(QMainWindow):
             new_added_since_refit += len(accepted_ids)
 
             # ==========================================
-            # 4.7 优化前沿点选择：基于曲线切向而非局部PCA方向
+            # 4.7 优化前沿点选择：基于曲线切向，增加优先级队列机制
             # ==========================================
             accepted_ids_arr = np.array(accepted_ids)
             accepted_pts = self.current_points[accepted_ids_arr]
@@ -1134,15 +1182,20 @@ class MainWindow(QMainWindow):
 
                 # 额外添加：如果接收点数较多，增加中间区域的采样
                 if len(accepted_ids_arr) > 20:
-                    mid_k = min(2, len(sort_idx) // 4)
+                    mid_k = min(3, len(sort_idx) // 4)  # 增加中间采样
                     mid_start = len(sort_idx) // 2 - mid_k // 2
                     for i in range(mid_start, mid_start + mid_k):
                         if 0 <= i < len(sort_idx):
                             frontier.add(int(accepted_ids_arr[sort_idx[i]]))
 
+            # 优先级队列：将前沿点添加到队列前端（双端队列的优势）
             for fid in frontier:
                 if fid not in queued:
-                    queue.append(fid)
+                    # 如果是大量接收，说明生长顺利，优先处理
+                    if len(accepted_ids) > 15:
+                        queue.appendleft(fid)  # 添加到队列前端
+                    else:
+                        queue.append(fid)  # 添加到队列后端
                     queued.add(fid)
 
             # ==========================================
