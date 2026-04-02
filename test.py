@@ -880,10 +880,26 @@ class MainWindow(QMainWindow):
         gap_tolerance = 2.5                       # 断裂容忍倍数（相对于半径）
 
         # =========================
-        # 1. 取出种子点
+        # 1. 取出种子点并进行质量检查
         # =========================
         seed_ids = list(self.seed_id)
         seed_points = self.current_points[seed_ids]
+
+        # 种子点质量检查：移除离群种子点
+        if len(seed_ids) >= 3:
+            seed_center = seed_points.mean(axis=0)
+            seed_dists = np.linalg.norm(seed_points - seed_center, axis=1)
+            seed_median_dist = np.median(seed_dists)
+            seed_mad = np.median(np.abs(seed_dists - seed_median_dist))
+
+            # 移除距离中位数超过3倍MAD的离群点
+            outlier_threshold = seed_median_dist + 3.0 * seed_mad
+            valid_seed_mask = seed_dists <= outlier_threshold
+            if np.sum(valid_seed_mask) >= 2:
+                seed_ids = [sid for sid, valid in zip(seed_ids, valid_seed_mask) if valid]
+                seed_points = self.current_points[seed_ids]
+                if np.sum(~valid_seed_mask) > 0:
+                    print(f"移除 {np.sum(~valid_seed_mask)} 个离群种子点")
 
         # =========================
         # 2. 初始拟合
@@ -903,10 +919,16 @@ class MainWindow(QMainWindow):
             print("种子点分布异常，无法拟合曲线")
             return list(self.seed_id)
 
-        # 检查种子点的线性度，如果过低则提前警告
+        # 检查种子点的线性度，如果过低则提前警告并尝试调整
         seed_linearity = (eigvals[0] - eigvals[1]) / eigvals[0]
-        if seed_linearity < 0.5:
-            print(f"警告：种子点线性度较低 ({seed_linearity:.3f})，可能影响提取效果")
+        if seed_linearity < 0.4:
+            print(f"警告：种子点线性度过低 ({seed_linearity:.3f})，提取可能失败")
+            return list(self.seed_id)
+        elif seed_linearity < 0.6:
+            print(f"警告：种子点线性度较低 ({seed_linearity:.3f})，将降低约束条件")
+            # 动态调整阈值
+            linearity_thresh = max(0.50, linearity_thresh - 0.1)
+            direction_cos_thresh = max(0.65, direction_cos_thresh - 0.1)
 
         direction_fit = eigvecs[:, 0]
 
@@ -1199,9 +1221,19 @@ class MainWindow(QMainWindow):
                     queued.add(fid)
 
             # ==========================================
-            # 4.8 生长一定数量后重新拟合，并更新距离阈值
+            # 4.8 智能重拟合：只在必要时重拟合
             # ==========================================
+            should_refit = False
+
+            # 条件1：累积足够多的新点
             if new_added_since_refit >= refit_batch_size:
+                should_refit = True
+
+            # 条件2：连续失败次数较多，可能需要更新曲线
+            if consecutive_failures >= 3 and new_added_since_refit >= refit_batch_size // 2:
+                should_refit = True
+
+            if should_refit:
                 pts = self.current_points[list(visited)]
 
                 if len(pts) >= 3:
