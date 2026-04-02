@@ -913,6 +913,10 @@ class MainWindow(QMainWindow):
             local_pts = self.current_points[local_neighbors]
             local_center = local_pts.mean(axis=0)
 
+            # 快速检查：如果邻域点数过少，跳过PCA计算
+            if len(local_pts) < 10:
+                continue
+
             local_cov = np.cov((local_pts - local_center).T)
             local_eigvals, local_eigvecs = np.linalg.eigh(local_cov)
 
