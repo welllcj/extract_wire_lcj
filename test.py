@@ -811,10 +811,10 @@ class MainWindow(QMainWindow):
         # 参数设置
         # =========================
 
-        linearity_thresh = 0.7                    # 局部线性度阈值
-        direction_cos_thresh = 0.85
-        refit_batch_size = 50                        # 每新增多少点重拟合一次
-        frontier_k = 5                               # 每端选几个前沿点
+        linearity_thresh = 0.65                   # 局部线性度阈值（降低以适应更多场景）
+        direction_cos_thresh = 0.80               # 方向一致性阈值（略微放宽）
+        refit_batch_size = 40                     # 每新增多少点重拟合一次（更频繁）
+        frontier_k = 6                            # 每端选几个前沿点（增加覆盖）
 
         # =========================
         # 1. 取出种子点
