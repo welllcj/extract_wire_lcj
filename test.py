@@ -950,9 +950,8 @@ class MainWindow(QMainWindow):
                 centroid_fit,
                 ax, ay, az
             )
-            print("点到曲线的距离：", dist_to_curve)
-            print("\n")
-            if dist_to_curve > dist_thresh:
+
+            if not np.isfinite(dist_to_curve) or dist_to_curve > dist_thresh:
                 continue
 
               # ==========================================
