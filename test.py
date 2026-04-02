@@ -887,8 +887,10 @@ class MainWindow(QMainWindow):
             mad = np.median(np.abs(seed_radial_dists - median_dist))
             structure_thickness = median_dist + 1.5 * mad
             dist_thresh = max(structure_thickness * 1.2, self.radus / 3)
+            print(f"初始距离阈值: {dist_thresh:.4f} (结构厚度: {structure_thickness:.4f})")
         else:
             dist_thresh = self.radus / 2
+            print(f"初始距离阈值: {dist_thresh:.4f} (默认值)")
 
         # =========================
         # 3. 初始化
