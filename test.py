@@ -840,6 +840,11 @@ class MainWindow(QMainWindow):
             print("种子点分布异常，无法拟合曲线")
             return list(self.seed_id)
 
+        # 检查种子点的线性度，如果过低则提前警告
+        seed_linearity = (eigvals[0] - eigvals[1]) / eigvals[0]
+        if seed_linearity < 0.5:
+            print(f"警告：种子点线性度较低 ({seed_linearity:.3f})，可能影响提取效果")
+
         direction_fit = eigvecs[:, 0]
 
         # t = PCA投影坐标
